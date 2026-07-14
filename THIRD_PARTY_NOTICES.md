@@ -1,6 +1,6 @@
 # Third-party notices
 
-Remote Terminal 0.2.0 includes the open-source components listed below. Versions and license identifiers are taken from the installed npm package metadata and Cargo registry manifests used by this release. “Copyright / attribution” reproduces the wording found in bundled license files where available; an author-only entry is identified as metadata and does not assert copyright ownership.
+Remote Terminal 0.3.0 includes the open-source components listed below. Versions and license identifiers are taken from the installed npm package metadata and Cargo registry manifests used by this release. “Copyright / attribution” reproduces the wording found in bundled license files where available; an author-only entry is identified as metadata and does not assert copyright ownership.
 
 The runtime tables cover the project's core direct production dependencies; the separate build-time table records direct release tooling. Transitive dependencies remain subject to their own licenses.
 

@@ -4,100 +4,106 @@ const CLEAR_CURRENT_TERMINAL_LINE = "\u0001\u000b";
 
 export const COMMAND_COMPLETIONS = Object.freeze([
   {
+    command: "ll",
+    description: "ls -l 的常用别名，长格式列出目录内容",
+    group: "文件",
+    keywords: ["ll", "ls -l", "长格式", "目录内容", "long listing", "list files", "directory listing"],
+  },
+  {
     command: "ls -lah",
     description: "查看当前目录详细内容",
     group: "文件",
-    keywords: ["ll", "ls", "目录列表", "文件列表", "列出文件", "查看目录", "查看文件"],
+    keywords: ["ls", "目录列表", "文件列表", "列出文件", "查看目录", "查看文件", "list files", "directory listing", "show files"],
   },
   {
     command: "cd /var/log",
     description: "进入系统日志目录",
     group: "文件",
-    keywords: ["cd", "切换目录", "日志目录"],
+    keywords: ["cd", "切换目录", "日志目录", "change directory", "logs"],
   },
   {
     command: "find . -type f -name '*.log'",
     description: "按名称查找日志文件",
     group: "文件",
-    keywords: ["find", "查找文件", "搜索文件", "日志文件"],
+    keywords: ["find", "查找文件", "搜索文件", "日志文件", "find files", "search files", "log files"],
   },
   {
     command: "grep -Rni -- 'ERROR' .",
     description: "递归查找错误内容",
     group: "文件",
-    keywords: ["grep", "搜索内容", "查找文本", "错误"],
+    keywords: ["grep", "搜索内容", "查找文本", "错误", "search text", "find text", "error"],
   },
   {
     command: "tail -f /var/log/messages",
     description: "持续查看系统日志",
     group: "日志",
-    keywords: ["tail", "实时日志", "跟踪日志"],
+    keywords: ["tail", "实时日志", "跟踪日志", "follow logs", "live logs"],
   },
   {
     command: "journalctl -xe",
     description: "查看近期系统错误",
     group: "日志",
-    keywords: ["journalctl", "系统日志", "错误日志"],
+    keywords: ["journalctl", "系统日志", "错误日志", "system logs", "error logs"],
   },
   {
     command: "journalctl -u nginx -f",
     description: "持续查看 nginx 服务日志",
     group: "日志",
-    keywords: ["journalctl", "nginx", "服务日志", "实时日志"],
+    keywords: ["journalctl", "nginx", "服务日志", "实时日志", "service logs", "follow nginx logs"],
   },
   {
     command: "systemctl status nginx",
     description: "查看 nginx 服务状态",
     group: "服务",
-    keywords: ["systemctl", "nginx", "服务状态"],
+    keywords: ["systemctl", "nginx", "服务状态", "service status"],
   },
   {
     command: "systemctl list-units --failed",
     description: "查看启动失败的服务",
     group: "服务",
-    keywords: ["systemctl", "失败服务", "异常服务"],
+    keywords: ["systemctl", "失败服务", "异常服务", "failed services"],
   },
   {
     command: "ps aux --sort=-%cpu | head",
     description: "查看 CPU 占用最高的进程",
     group: "性能",
-    keywords: ["ps", "cpu", "进程", "进程排行"],
+    keywords: ["ps", "cpu", "进程", "进程排行", "processes", "top cpu"],
   },
   {
     command: "free -h",
     description: "查看内存与 Swap",
     group: "性能",
-    keywords: ["free", "内存", "swap", "交换空间"],
+    keywords: ["free", "内存", "swap", "交换空间", "memory"],
   },
   {
     command: "df -h",
     description: "查看文件系统容量",
     group: "性能",
-    keywords: ["df", "磁盘", "磁盘容量", "文件系统"],
+    keywords: ["df", "磁盘", "磁盘容量", "文件系统", "disk", "disk space", "filesystem"],
   },
   {
     command: "ss -lntp",
     description: "查看正在监听的 TCP 端口",
     group: "网络",
-    keywords: ["ss", "tcp", "端口", "监听端口"],
+    keywords: ["ss", "tcp", "端口", "监听端口", "ports", "listening ports"],
   },
   {
     command: "ip address",
     description: "查看网络接口与地址",
     group: "网络",
-    keywords: ["ip", "ip地址", "网卡", "网络接口"],
+    keywords: ["ip", "ip地址", "网卡", "网络接口", "ip address", "network interface"],
   },
   {
     command: "docker ps",
     description: "查看运行中的容器",
     group: "容器",
-    keywords: ["docker", "容器列表", "运行容器"],
+    keywords: ["docker", "容器列表", "运行容器", "containers", "running containers"],
   },
   {
     command: "docker compose ps",
     description: "查看 Compose 服务状态",
     group: "容器",
-    keywords: ["docker", "compose", "容器编排", "服务状态"],
+    keywords: ["docker", "compose", "容器编排", "服务状态", "container services"],
   },
 ].map((completion) => Object.freeze({
   ...completion,
@@ -307,6 +313,25 @@ export function searchCommandCompletions(
     .map(({ completion, matchType }) => ({ ...completion, matchType }));
 }
 
+export function searchInlineCommandCompletions(
+  query,
+  { completions = COMMAND_COMPLETIONS, limit = 10 } = {},
+) {
+  const normalizedQuery = normalizeSearchText(query);
+  const resultLimit = Number.isInteger(limit) && limit >= 0 ? limit : 10;
+  if (!normalizedQuery) return [];
+
+  if (/^[\x20-\x7e]+$/.test(normalizedQuery)) {
+    const commandPrefixes = completions
+      .filter((completion) => normalizeSearchText(completion.command).startsWith(normalizedQuery))
+      .slice(0, resultLimit)
+      .map((completion) => ({ ...completion, matchType: "prefix" }));
+    if (commandPrefixes.length) return commandPrefixes;
+  }
+
+  return searchCommandCompletions(normalizedQuery, { completions, limit: resultLimit });
+}
+
 export function nextCommandCompletionIndex(currentIndex, key, length) {
   if (!Number.isInteger(length) || length <= 0) return null;
   if (key === "Home") return 0;
@@ -375,6 +400,50 @@ export function resolveInlineCompletionKeyAction({ key, open, reliable, suggesti
   if (key === "Tab") return reliable && suggestionCount > 0 ? "insert" : "passthrough";
   if (["ArrowDown", "ArrowUp"].includes(key) && suggestionCount > 0) return "navigate";
   return "passthrough";
+}
+
+export function calculateInlineCompletionPosition({
+  cursorLeft,
+  cursorTop,
+  lineHeight,
+  containerWidth,
+  containerHeight,
+  popoverWidth,
+  popoverHeight,
+  margin = 8,
+  gap = 6,
+}) {
+  const values = [cursorLeft, cursorTop, lineHeight, containerWidth, containerHeight, popoverWidth, popoverHeight, margin, gap];
+  if (values.some((value) => !Number.isFinite(value))
+    || lineHeight <= 0
+    || containerWidth <= 0
+    || containerHeight <= 0
+    || popoverWidth <= 0
+    || popoverHeight <= 0
+    || margin < 0
+    || gap < 0) {
+    throw new TypeError("行内补全定位参数无效");
+  }
+
+  const maxLeft = Math.max(margin, containerWidth - popoverWidth - margin);
+  const left = Math.min(Math.max(cursorLeft, margin), maxLeft);
+  const belowTop = cursorTop + lineHeight + gap;
+  const fitsBelow = belowTop + popoverHeight <= containerHeight - margin;
+  return {
+    left,
+    top: fitsBelow ? belowTop : Math.max(margin, cursorTop - popoverHeight - gap),
+    placement: fitsBelow ? "below" : "above",
+  };
+}
+
+export function shouldAutoOpenCommandCompletion(state, suggestionCount) {
+  return Boolean(
+    state?.reliable
+    && typeof state.text === "string"
+    && state.text.trim()
+    && Number.isInteger(suggestionCount)
+    && suggestionCount > 0,
+  );
 }
 
 export function isImeCompositionKeyEvent(event, compositionActive = false) {

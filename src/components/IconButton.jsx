@@ -1,6 +1,9 @@
-export function IconButton({ label, active = false, children, className = "", ...buttonProps }) {
+import { forwardRef } from "react";
+
+export const IconButton = forwardRef(function IconButton({ label, active = false, children, className = "", ...buttonProps }, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       className={`icon-button ${active ? "is-active" : ""} ${className}`.trim()}
       aria-label={label}
@@ -10,4 +13,4 @@ export function IconButton({ label, active = false, children, className = "", ..
       {children}
     </button>
   );
-}
+});

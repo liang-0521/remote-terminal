@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ListBullets, Plus, Terminal as TerminalIcon, X } from "@phosphor-icons/react";
+import {
+  ClockCounterClockwise,
+  MagnifyingGlass,
+  Plus,
+  Terminal as TerminalIcon,
+  X,
+} from "@phosphor-icons/react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   buildCommandCompletionCatalog,
   advanceTerminalInputState,
+  calculateInlineCompletionPosition,
   createTerminalCompletionInput,
   createTerminalInputState,
   isImeCompositionKeyEvent,
   nextCommandCompletionIndex,
   resolveInlineCompletionKeyAction,
   searchCommandCompletions,
+  searchInlineCommandCompletions,
+  shouldAutoOpenCommandCompletion,
 } from "../services/command-completion.js";
 import { IconButton } from "./IconButton.jsx";
 
@@ -173,62 +182,124 @@ function XtermSurface({
   const fitRef = useRef(null);
   const terminalWriteQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
+  const commandSearchInputRef = useRef(null);
   const completionCatalogRef = useRef([]);
-  const completionOpenRef = useRef(false);
+  const inlineCompletionOpenRef = useRef(false);
+  const commandSearchOpenRef = useRef(false);
   const terminalInputRef = useRef(createTerminalInputState());
   const suggestionIndexRef = useRef(0);
   const suggestionsRef = useRef([]);
-  const [completionOpen, setCompletionOpen] = useState(false);
+  const [inlineCompletionOpen, setInlineCompletionOpen] = useState(false);
+  const [commandSearchOpen, setCommandSearchOpen] = useState(false);
+  const [commandSearchQuery, setCommandSearchQuery] = useState("");
+  const [commandSearchIndex, setCommandSearchIndex] = useState(0);
   const [terminalInput, setTerminalInput] = useState(() => createTerminalInputState());
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [inlineAnchor, setInlineAnchor] = useState({ left: 12, top: 42, placement: "below" });
   const completionCatalog = useMemo(() => buildCommandCompletionCatalog({
     remoteCompletions,
     directoryEntries,
   }), [directoryEntries, remoteCompletions]);
-  const suggestions = useMemo(
+  const inlineSuggestions = useMemo(
     () => terminalInput.reliable
-      ? searchCommandCompletions(terminalInput.text, { completions: completionCatalog })
+      ? searchInlineCommandCompletions(terminalInput.text, { completions: completionCatalog, limit: 10 })
       : [],
     [completionCatalog, terminalInput],
   );
-  const selectedSuggestionIndex = suggestions.length ? Math.min(suggestionIndex, suggestions.length - 1) : -1;
-  const completionId = `native-inline-completions-${connectionId}`;
-  const selectedOptionId = selectedSuggestionIndex >= 0 ? `${completionId}-option-${selectedSuggestionIndex}` : undefined;
+  const commandSearchResults = useMemo(
+    () => searchCommandCompletions(commandSearchQuery, { completions: completionCatalog, limit: 30 }),
+    [commandSearchQuery, completionCatalog],
+  );
+  const selectedSuggestionIndex = inlineSuggestions.length ? Math.min(suggestionIndex, inlineSuggestions.length - 1) : -1;
+  const selectedSearchIndex = commandSearchResults.length ? Math.min(commandSearchIndex, commandSearchResults.length - 1) : -1;
+  const inlineCompletionId = `native-inline-completions-${connectionId}`;
+  const commandSearchId = `native-command-search-${connectionId}`;
+  const selectedInlineOptionId = selectedSuggestionIndex >= 0
+    ? `${inlineCompletionId}-option-${selectedSuggestionIndex}`
+    : undefined;
+  const selectedSearchOptionId = selectedSearchIndex >= 0
+    ? `${commandSearchId}-option-${selectedSearchIndex}`
+    : undefined;
   completionCatalogRef.current = completionCatalog;
-  suggestionsRef.current = suggestions;
+  suggestionsRef.current = inlineSuggestions;
   suggestionIndexRef.current = selectedSuggestionIndex;
 
   const focusTerminalSoon = useCallback(() => {
     window.requestAnimationFrame(() => terminalRef.current?.focus());
   }, []);
 
-  const closeCompletion = useCallback(() => {
-    completionOpenRef.current = false;
+  const updateInlineAnchor = useCallback(() => {
+    const terminal = terminalRef.current;
+    const container = containerRef.current;
+    const slot = container?.closest(".native-terminal-slot");
+    const screen = container?.querySelector(".xterm-screen");
+    if (!terminal || !slot || !screen || terminal.cols <= 0 || terminal.rows <= 0) return;
+    const slotRect = slot.getBoundingClientRect();
+    const screenRect = screen.getBoundingClientRect();
+    const cellWidth = screenRect.width / terminal.cols;
+    const lineHeight = screenRect.height / terminal.rows;
+    const popoverWidth = Math.max(1, Math.min(420, slotRect.width - 16));
+    const popoverHeight = Math.max(38, Math.min(suggestionsRef.current.length, 10) * 36 + 2);
+    const nextAnchor = calculateInlineCompletionPosition({
+      cursorLeft: screenRect.left - slotRect.left + (terminal.buffer.active.cursorX * cellWidth) + 2,
+      cursorTop: screenRect.top - slotRect.top + (terminal.buffer.active.cursorY * lineHeight),
+      lineHeight,
+      containerWidth: slotRect.width,
+      containerHeight: slotRect.height,
+      popoverWidth,
+      popoverHeight,
+    });
+    setInlineAnchor(nextAnchor);
+  }, []);
+
+  const closeInlineCompletion = useCallback(() => {
+    inlineCompletionOpenRef.current = false;
     suggestionIndexRef.current = 0;
-    setCompletionOpen(false);
+    setInlineCompletionOpen(false);
     setSuggestionIndex(0);
   }, []);
 
-  const toggleCompletion = useCallback(() => {
-    const nextOpen = !completionOpenRef.current;
-    completionOpenRef.current = nextOpen;
-    suggestionIndexRef.current = 0;
-    setCompletionOpen(nextOpen);
-    setSuggestionIndex(0);
-    focusTerminalSoon();
+  const closeCommandSearch = useCallback(({ returnFocus = true } = {}) => {
+    commandSearchOpenRef.current = false;
+    setCommandSearchOpen(false);
+    setCommandSearchQuery("");
+    setCommandSearchIndex(0);
+    if (returnFocus) focusTerminalSoon();
   }, [focusTerminalSoon]);
+
+  const openCommandSearch = useCallback(() => {
+    closeInlineCompletion();
+    commandSearchOpenRef.current = true;
+    setCommandSearchOpen(true);
+    setCommandSearchQuery("");
+    setCommandSearchIndex(0);
+    window.requestAnimationFrame(() => commandSearchInputRef.current?.focus());
+  }, [closeInlineCompletion]);
+
+  const toggleCommandSearch = useCallback(() => {
+    if (commandSearchOpenRef.current) closeCommandSearch();
+    else openCommandSearch();
+  }, [closeCommandSearch, openCommandSearch]);
 
   const trackTerminalInput = useCallback((data) => {
     const nextState = advanceTerminalInputState(terminalInputRef.current, data);
     terminalInputRef.current = nextState;
-    suggestionsRef.current = nextState.reliable
-      ? searchCommandCompletions(nextState.text, { completions: completionCatalogRef.current })
+    const nextSuggestions = nextState.reliable
+      ? searchInlineCommandCompletions(nextState.text, { completions: completionCatalogRef.current, limit: 10 })
       : [];
+    suggestionsRef.current = nextSuggestions;
     suggestionIndexRef.current = 0;
     setTerminalInput(nextState);
     setSuggestionIndex(0);
-    if (!nextState.reliable || /[\r\n\u0003]/.test(data)) closeCompletion();
-  }, [closeCompletion]);
+    if (!nextState.reliable || /[\r\n\u0003]/.test(data)) {
+      closeInlineCompletion();
+      return;
+    }
+    const nextOpen = shouldAutoOpenCommandCompletion(nextState, nextSuggestions.length);
+    inlineCompletionOpenRef.current = nextOpen;
+    setInlineCompletionOpen(nextOpen);
+    if (nextOpen) window.requestAnimationFrame(updateInlineAnchor);
+  }, [closeInlineCompletion, updateInlineAnchor]);
 
   const enqueueTerminalWrite = useCallback((data) => {
     const request = terminalWriteQueueRef.current.then(() => client.terminal.write(sessionId, data));
@@ -239,14 +310,16 @@ function XtermSurface({
   const insertCompletion = useCallback((command) => {
     const input = createTerminalCompletionInput(terminalInputRef.current, command);
     if (!input) {
-      closeCompletion();
+      closeInlineCompletion();
+      closeCommandSearch({ returnFocus: false });
       focusTerminalSoon();
       return;
     }
     const nextState = { reliable: true, text: command };
     terminalInputRef.current = nextState;
     setTerminalInput(nextState);
-    closeCompletion();
+    closeInlineCompletion();
+    closeCommandSearch({ returnFocus: false });
     void enqueueTerminalWrite(input)
       .then(focusTerminalSoon)
       .catch((error) => {
@@ -255,12 +328,21 @@ function XtermSurface({
         setTerminalInput(unreliableState);
         onError?.(error, connectionId);
       });
-  }, [closeCompletion, connectionId, enqueueTerminalWrite, focusTerminalSoon, onError]);
+  }, [closeCommandSearch, closeInlineCompletion, connectionId, enqueueTerminalWrite, focusTerminalSoon, onError]);
+
+  useEffect(() => {
+    if (!commandSearchOpen || selectedSearchIndex < 0) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`${commandSearchId}-option-${selectedSearchIndex}`)?.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [commandSearchId, commandSearchOpen, selectedSearchIndex]);
 
   useEffect(() => {
     activeRef.current = active;
     if (!active) {
-      closeCompletion();
+      closeInlineCompletion();
+      closeCommandSearch({ returnFocus: false });
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
@@ -268,7 +350,7 @@ function XtermSurface({
       if (focusTerminalOnActivate) terminalRef.current?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active, closeCompletion, focusTerminalOnActivate]);
+  }, [active, closeCommandSearch, closeInlineCompletion, focusTerminalOnActivate]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -318,7 +400,7 @@ function XtermSurface({
         || (!event.shiftKey && event.code === "Space")
       );
       if (togglesCompletion) {
-        toggleCompletion();
+        toggleCommandSearch();
         return false;
       }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyC") {
@@ -341,16 +423,16 @@ function XtermSurface({
       const currentSuggestions = suggestionsRef.current;
       const keyAction = resolveInlineCompletionKeyAction({
         key: event.key,
-        open: completionOpenRef.current,
+        open: inlineCompletionOpenRef.current,
         reliable: terminalInputRef.current.reliable,
         suggestionCount: currentSuggestions.length,
       });
       if (keyAction === "close") {
-        closeCompletion();
+        closeInlineCompletion();
         return false;
       }
       if (keyAction === "execute") {
-        closeCompletion();
+        closeInlineCompletion();
         return true;
       }
       if (keyAction === "navigate") {
@@ -367,7 +449,7 @@ function XtermSurface({
         insertCompletion(currentSuggestions[currentIndex].command);
         return false;
       }
-      if (completionOpenRef.current && event.key === "Tab") closeCompletion();
+      if (inlineCompletionOpenRef.current && event.key === "Tab") closeInlineCompletion();
       return true;
     });
 
@@ -376,7 +458,9 @@ function XtermSurface({
     const unsubscribe = client.events.onTerminalData((event) => {
       if (event?.sessionId !== sessionId || disposed) return;
       if (attaching) pendingData.push(event.data);
-      else terminal.write(event.data);
+      else terminal.write(event.data, () => {
+        if (inlineCompletionOpenRef.current) updateInlineAnchor();
+      });
     });
     const inputSubscription = terminal.onData((data) => {
       trackTerminalInput(data);
@@ -386,8 +470,13 @@ function XtermSurface({
       if (!activeRef.current) return;
       void client.terminal.resize(sessionId, { cols, rows }).catch((error) => onError?.(error, connectionId));
     });
+    const scrollSubscription = terminal.onScroll(() => {
+      if (inlineCompletionOpenRef.current) updateInlineAnchor();
+    });
     const resizeObserver = new ResizeObserver(() => {
-      if (activeRef.current) fit.fit();
+      if (!activeRef.current) return;
+      fit.fit();
+      if (inlineCompletionOpenRef.current) updateInlineAnchor();
     });
     resizeObserver.observe(element);
 
@@ -409,13 +498,14 @@ function XtermSurface({
       disposed = true;
       unsubscribe();
       resizeObserver.disconnect();
+      scrollSubscription.dispose();
       resizeSubscription.dispose();
       inputSubscription.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, sessionId, toggleCompletion, trackTerminalInput]);
+  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, sessionId, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
 
   return (
     <>
@@ -423,67 +513,128 @@ function XtermSurface({
       <button
         type="button"
         className="native-completion-trigger"
-        aria-expanded={completionOpen}
-        aria-controls={completionId}
-        aria-haspopup="listbox"
+        aria-expanded={commandSearchOpen}
+        aria-controls={commandSearchId}
+        aria-haspopup="dialog"
         aria-keyshortcuts="Control+Shift+P Control+Space"
-        aria-label={`${completionOpen ? "关闭" : "打开"}行内智能补全，快捷键 Ctrl+Shift+P，兼容 Ctrl+Space`}
+        aria-label={`${commandSearchOpen ? "关闭" : "打开"}命令搜索，快捷键 Ctrl+Shift+P，兼容 Ctrl+Space`}
         onMouseDown={(event) => event.preventDefault()}
-        onClick={toggleCompletion}
+        onClick={toggleCommandSearch}
       >
-        <ListBullets size={15} /> 智能补全{completionLoading ? "（加载中）" : completionError ? "（部分可用）" : ""} <kbd>Ctrl+Shift+P</kbd>
+        <MagnifyingGlass size={15} /> 命令搜索{completionLoading ? "（加载中）" : completionError ? "（部分可用）" : ""} <kbd>Ctrl+Shift+P</kbd>
       </button>
-      {completionOpen && active && (
-        <div id={completionId} className="native-inline-completions" aria-label="终端行内智能补全">
+      {commandSearchOpen && active && (
+        <section id={commandSearchId} className="native-command-search" role="dialog" aria-label="命令搜索">
           <header>
-            <span>
-              <ListBullets size={17} />
-              <strong>{terminalInput.reliable ? "基于当前输入实时匹配" : "当前行不可可靠补全"}</strong>
-            </span>
-            <kbd>Esc</kbd>
-          </header>
-          {terminalInput.reliable ? (
-            <div
-              id={`${completionId}-options`}
-              className="native-inline-completions__options"
-              role="listbox"
-              aria-label="匹配当前终端输入的补全"
-              aria-activedescendant={selectedOptionId}
-            >
-              {suggestions.length ? suggestions.map((item, index) => (
-              <button
-                key={item.command}
-                id={`${completionId}-option-${index}`}
-                type="button"
-                role="option"
-                tabIndex={-1}
-                aria-selected={selectedSuggestionIndex === index}
-                className={selectedSuggestionIndex === index ? "is-selected" : ""}
-                onMouseDown={(event) => event.preventDefault()}
-                onMouseEnter={() => {
-                  suggestionIndexRef.current = index;
-                  setSuggestionIndex(index);
+            <label className="native-command-search__field">
+              <MagnifyingGlass size={17} aria-hidden="true" />
+              <input
+                ref={commandSearchInputRef}
+                type="search"
+                role="combobox"
+                aria-label="搜索命令或用途"
+                aria-expanded="true"
+                aria-autocomplete="list"
+                aria-controls={`${commandSearchId}-options`}
+                aria-activedescendant={selectedSearchOptionId}
+                placeholder="搜索命令或用途，例如 ls / 查看文件 / memory"
+                value={commandSearchQuery}
+                onChange={(event) => {
+                  setCommandSearchQuery(event.target.value);
+                  setCommandSearchIndex(0);
                 }}
-                onClick={() => insertCompletion(item.command)}
-              >
-                <code>{item.command}</code>
-                <span>{item.description}</span>
-                <small>{item.sourceLabel || item.group}</small>
-              </button>
-              )) : <div className="native-inline-completions__empty">当前输入没有匹配的补全候选</div>}
-            </div>
-          ) : (
-            <div className="native-inline-completions__empty">
-              当前行经过了光标移动、远端 Tab 补全或未知控制输入。请按 Enter 或 Ctrl+C 建立新输入行后再试。
-            </div>
-          )}
+                onKeyDown={(event) => {
+                  if (isImeCompositionKeyEvent(event)) return;
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeCommandSearch();
+                    return;
+                  }
+                  if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                    event.preventDefault();
+                    const nextIndex = nextCommandCompletionIndex(selectedSearchIndex, event.key, commandSearchResults.length);
+                    if (nextIndex !== null) setCommandSearchIndex(nextIndex);
+                    return;
+                  }
+                  if (event.key === "Enter" && selectedSearchIndex >= 0) {
+                    event.preventDefault();
+                    insertCompletion(commandSearchResults[selectedSearchIndex].command);
+                  }
+                }}
+              />
+            </label>
+            <button type="button" aria-label="关闭命令搜索" onClick={() => closeCommandSearch()}><X size={17} /></button>
+          </header>
+          <div id={`${commandSearchId}-options`} className="native-command-search__options" role="listbox" aria-label="命令搜索结果">
+            {commandSearchResults.length ? commandSearchResults.map((item, index) => (
+              <CompletionOption
+                key={item.command}
+                id={`${commandSearchId}-option-${index}`}
+                item={item}
+                selected={selectedSearchIndex === index}
+                onHover={() => setCommandSearchIndex(index)}
+                onChoose={() => insertCompletion(item.command)}
+              />
+            )) : <div className="native-completion-empty">没有找到匹配的命令或用途</div>}
+          </div>
           <footer>
             {completionLoading && "正在加载远端命令与 Shell 历史；内置语义和当前目录候选已可用。 "}
             {completionError && `远端补全加载失败：${completionError}；内置语义和当前目录候选仍可用。 `}
-            ↑/↓ 选择 · Tab 插入 · Enter 执行当前行 · Esc 关闭；命令数据不离开本机与当前 SSH 会话
+            支持中文用途和英文命令/意图搜索 · ↑/↓ 选择 · Enter 插入 · Esc 关闭
           </footer>
+        </section>
+      )}
+      {inlineCompletionOpen && active && !commandSearchOpen && terminalInput.reliable && inlineSuggestions.length > 0 && (
+        <div
+          id={inlineCompletionId}
+          className="native-inline-completions"
+          role="listbox"
+          aria-label={`匹配当前输入 ${terminalInput.text} 的命令候选`}
+          aria-activedescendant={selectedInlineOptionId}
+          data-placement={inlineAnchor.placement}
+          style={{
+            "--inline-completion-left": `${inlineAnchor.left}px`,
+            "--inline-completion-top": `${inlineAnchor.top}px`,
+          }}
+        >
+          {inlineSuggestions.map((item, index) => (
+            <CompletionOption
+              compact
+              key={item.command}
+              id={`${inlineCompletionId}-option-${index}`}
+              item={item}
+              selected={selectedSuggestionIndex === index}
+              onHover={() => {
+                suggestionIndexRef.current = index;
+                setSuggestionIndex(index);
+              }}
+              onChoose={() => insertCompletion(item.command)}
+            />
+          ))}
         </div>
       )}
     </>
+  );
+}
+
+function CompletionOption({ id, item, selected, compact = false, onHover, onChoose }) {
+  const CandidateIcon = item.source === "history" ? ClockCounterClockwise : TerminalIcon;
+  return (
+    <button
+      id={id}
+      type="button"
+      role="option"
+      tabIndex={-1}
+      aria-selected={selected}
+      className={`native-completion-option ${compact ? "is-compact" : ""} ${selected ? "is-selected" : ""}`.trim()}
+      onMouseDown={(event) => event.preventDefault()}
+      onMouseEnter={onHover}
+      onClick={onChoose}
+    >
+      <CandidateIcon size={16} aria-hidden="true" />
+      <code>{item.command}</code>
+      <span>{item.description}</span>
+      {!compact && <small>{item.sourceLabel || item.group}</small>}
+    </button>
   );
 }

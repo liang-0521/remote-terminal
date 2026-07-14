@@ -11,9 +11,11 @@ import { SettingsDialog } from "./components/SettingsDialog.jsx";
 import { StatusBar } from "./components/StatusBar.jsx";
 import { TopBar } from "./components/TopBar.jsx";
 import { getNativeClient } from "./native/client.js";
+import { resolveInterfaceColorScheme } from "./services/interface-theme.js";
 import "./native-styles.css";
 import "./update-styles.css";
 import "./credential-styles.css";
+import "./theme-styles.css";
 
 const NativeTerminalPane = lazy(() => import("./components/NativeTerminalPane.jsx")
   .then(({ NativeTerminalPane: component }) => ({ default: component })));
@@ -104,6 +106,12 @@ export function NativeApp() {
   const [closeRequestId, setCloseRequestId] = useState(null);
   const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
+  const [interfaceThemeMode, setInterfaceThemeMode] = useState("system");
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => (
+    typeof window.matchMedia !== "function"
+      ? true
+      : window.matchMedia("(prefers-color-scheme: dark)").matches
+  ));
   const [updateState, setUpdateState] = useState(null);
   const [updateActionError, setUpdateActionError] = useState("");
   const [credentialStorage, setCredentialStorage] = useState({ available: false, protection: "windows-user" });
@@ -121,6 +129,16 @@ export function NativeApp() {
   const completionRequestsRef = useRef(new Map());
   const monitorInFlightRef = useRef(new Set());
   activeConnectionIdRef.current = activeConnectionId;
+  const interfaceColorScheme = resolveInterfaceColorScheme(interfaceThemeMode, systemPrefersDark);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemPreference = (event) => setSystemPrefersDark(event.matches);
+    setSystemPrefersDark(query.matches);
+    query.addEventListener("change", updateSystemPreference);
+    return () => query.removeEventListener("change", updateSystemPreference);
+  }, []);
 
   const updateWorkspace = useCallback((connectionId, updater) => {
     const current = workspacesRef.current;
@@ -742,7 +760,12 @@ export function NativeApp() {
   }
 
   return (
-    <div className="app-root" style={{ "--accent": appearance.accent }}>
+    <div
+      className="app-root"
+      data-color-scheme={interfaceColorScheme}
+      data-theme-mode={interfaceThemeMode}
+      style={{ "--accent": appearance.accent }}
+    >
       <main className={`app-shell ${railVisible ? "" : "is-rail-hidden"}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>
         <TopBar
           server={activeServer}
@@ -758,7 +781,9 @@ export function NativeApp() {
         {railVisible && <ActivityRail
           activeItem={activeRail}
           settingsOpen={settingsOpen}
+          themeMode={interfaceThemeMode}
           onChange={handleRailChange}
+          onThemeModeChange={setInterfaceThemeMode}
           onOpenSettings={() => setSettingsOpen(true)}
         />}
         <div className="workbench">

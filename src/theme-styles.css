@@ -1,0 +1,485 @@
+.app-root {
+  color-scheme: dark;
+  --surface-chrome: #071525;
+  --surface-input: #081726;
+  --surface-input-raised: #0b1929;
+  --surface-tabs: #081827;
+  --surface-bottom: #081726;
+  --surface-card: #0a1929;
+  --surface-card-header: #0d1c2d;
+  --surface-dialog: #0c1b2b;
+  --surface-dialog-header: #0f2032;
+  --surface-dialog-card: #091827;
+  --surface-dialog-card-muted: #0a1827;
+  --surface-dialog-card-active: #141d38;
+  --surface-native-header: #0b1928;
+  --surface-status: #071523;
+  --surface-code: #071523;
+  --surface-completion: #101d2c;
+  --surface-completion-native: rgb(8 23 38 / 96%);
+  --surface-completion-footer: rgb(4 14 24 / 42%);
+  --surface-completion-trigger: rgb(7 21 35 / 88%);
+  --surface-completion-trigger-hover: #15243a;
+  --surface-drop-overlay: rgb(9 24 41 / 94%);
+  --surface-scrim: rgb(2 9 16 / 72%);
+  --surface-scrim-strong: rgb(2 9 16 / 78%);
+  --surface-hover: rgb(255 255 255 / 5%);
+  --surface-hover-subtle: rgb(255 255 255 / 3%);
+  --surface-accent-soft: rgb(157 132 248 / 8%);
+  --surface-accent-selected: rgb(157 132 248 / 9%);
+  --surface-accent-card: rgb(157 132 248 / 7%);
+  --surface-danger-soft: rgb(255 123 134 / 8%);
+  --surface-warning-soft: rgb(245 158 11 / 7%);
+  --surface-update: rgb(7 21 37 / 50%);
+  --surface-update-strong: rgb(9 25 43 / 90%);
+  --surface-update-disabled: rgb(15 33 51 / 60%);
+  --surface-credential: rgb(9 26 43 / 52%);
+  --popover-border: #3d4d62;
+  --dialog-border: #35495f;
+  --field-outline: #40536a;
+  --resize-handle: #34475a;
+  --folder-icon: #e8b85d;
+  --accent-foreground: #efeaff;
+  --accent-soft-foreground: #efeaff;
+  --accent-emphasis: #d8ceff;
+  --accent-selection: #cbbcff;
+  --code-text: #dcd6f7;
+  --completion-code-text: #efeaff;
+  --shadow-popover: rgb(0 0 0 / 38%);
+  --shadow-dialog: rgb(0 0 0 / 58%);
+}
+
+.app-root[data-color-scheme="light"] {
+  color-scheme: light;
+  --bg-app: #e9eef5;
+  --bg-panel: #f6f8fb;
+  --bg-terminal: #f8fafc;
+  --bg-elevated: #ffffff;
+  --bg-tab-active: #e7ecf4;
+  --bg-selection: #e8e4ff;
+  --bg-suggestion-active: #e5e1fb;
+  --border-subtle: #e4e8ee;
+  --border-default: #d6dce6;
+  --border-strong: #c3ccd9;
+  --text-strong: #111827;
+  --text-primary: #253044;
+  --text-secondary: #4b5565;
+  --text-muted: #70798a;
+  --link: #1769aa;
+  --success: #16814e;
+  --warning: #946200;
+  --danger: #c43d4d;
+  --progress-track: #d8deea;
+  --accent-hover: color-mix(in srgb, var(--accent), #000 18%);
+  --accent-muted: color-mix(in srgb, var(--accent), #fff 34%);
+  --surface-chrome: #f8fafc;
+  --surface-input: #ffffff;
+  --surface-input-raised: #ffffff;
+  --surface-tabs: #f3f6fa;
+  --surface-bottom: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-card-header: #f4f6fa;
+  --surface-dialog: #f8fafc;
+  --surface-dialog-header: #f1f4f8;
+  --surface-dialog-card: #ffffff;
+  --surface-dialog-card-muted: #ffffff;
+  --surface-dialog-card-active: #eeeafd;
+  --surface-native-header: #f2f5f9;
+  --surface-status: #f4f7fa;
+  --surface-code: #f3f5f8;
+  --surface-completion: #ffffff;
+  --surface-completion-native: rgb(255 255 255 / 98%);
+  --surface-completion-footer: #f4f6f9;
+  --surface-completion-trigger: #f5f2ff;
+  --surface-completion-trigger-hover: #eae5ff;
+  --surface-drop-overlay: rgb(247 244 255 / 96%);
+  --surface-scrim: rgb(34 44 58 / 28%);
+  --surface-scrim-strong: rgb(34 44 58 / 34%);
+  --surface-hover: rgb(17 24 39 / 6%);
+  --surface-hover-subtle: rgb(17 24 39 / 4%);
+  --surface-accent-soft: color-mix(in srgb, var(--accent), transparent 88%);
+  --surface-accent-selected: color-mix(in srgb, var(--accent), transparent 86%);
+  --surface-accent-card: color-mix(in srgb, var(--accent), transparent 92%);
+  --surface-danger-soft: rgb(196 61 77 / 8%);
+  --surface-warning-soft: rgb(148 98 0 / 8%);
+  --surface-update: #f7f9fc;
+  --surface-update-strong: #f1f4f8;
+  --surface-update-disabled: #eef1f5;
+  --surface-credential: #f6f8fb;
+  --popover-border: #c3ccd9;
+  --dialog-border: #bcc6d4;
+  --field-outline: #aeb8c8;
+  --resize-handle: #aeb8c8;
+  --folder-icon: #ad741d;
+  --accent-foreground: #ffffff;
+  --accent-soft-foreground: #5e46b5;
+  --accent-emphasis: #5e46b5;
+  --accent-selection: #5e46b5;
+  --code-text: #4e3f8f;
+  --completion-code-text: #4e3f8f;
+  --shadow-popover: rgb(26 37 52 / 18%);
+  --shadow-dialog: rgb(26 37 52 / 24%);
+}
+
+.top-bar,
+.activity-rail {
+  background: var(--surface-chrome);
+}
+
+.icon-button:hover,
+.server-picker__menu button:hover,
+.server-picker__menu button:focus-visible,
+.connection-manager__close:hover,
+.settings-panel__close:hover,
+.native-dialog__close:hover,
+.monitor-dashboard__table tbody tr:hover td {
+  background: var(--surface-hover);
+}
+
+.server-picker__trigger,
+.path-select {
+  background: var(--surface-input-raised);
+}
+
+.server-picker__menu {
+  box-shadow: 0 12px 28px var(--shadow-popover);
+}
+
+.server-picker__menu button.is-current {
+  color: var(--accent-emphasis);
+  background: var(--surface-accent-selected);
+}
+
+.activity-rail__secondary {
+  display: grid;
+  gap: 4px;
+}
+
+.activity-rail__theme {
+  position: relative;
+}
+
+.activity-rail__theme-menu {
+  position: absolute;
+  bottom: 2px;
+  left: 52px;
+  z-index: 70;
+  width: 172px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 28px var(--shadow-popover);
+}
+
+.activity-rail__theme-menu button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 10px;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.activity-rail__theme-menu button:hover,
+.activity-rail__theme-menu button:focus-visible {
+  outline: none;
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.activity-rail__theme-menu button[aria-checked="true"] {
+  color: var(--accent-emphasis);
+  background: var(--surface-accent-selected);
+}
+
+.activity-rail__theme-menu button i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--text-muted);
+  border-radius: 50%;
+}
+
+.activity-rail__theme-menu button[aria-checked="true"] i {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 76%);
+}
+
+.file-tree__drop-overlay {
+  background: var(--surface-drop-overlay);
+}
+
+.file-tree__drop-overlay strong,
+.bottom-panel__tabs button:not(.icon-button).is-active,
+.tab-badge {
+  color: var(--accent-emphasis);
+}
+
+.tree-row:hover {
+  background: var(--surface-hover);
+}
+
+.tree-row svg:nth-child(2) {
+  color: var(--folder-icon);
+}
+
+.tree-row.is-selected,
+.completion-trigger,
+.native-completion-trigger {
+  color: var(--accent-selection);
+}
+
+.terminal-tabs {
+  background: var(--surface-tabs);
+}
+
+.completion-trigger,
+.native-completion-trigger {
+  background: var(--surface-completion-trigger);
+}
+
+.completion-trigger:hover,
+.completion-trigger[aria-expanded="true"],
+.native-completion-trigger:hover,
+.native-completion-trigger[aria-expanded="true"] {
+  background: var(--surface-completion-trigger-hover);
+}
+
+.completion-trigger kbd,
+.native-completion-trigger kbd {
+  border-color: var(--field-outline);
+  background: var(--surface-input);
+}
+
+.completion-popover,
+.native-command-palette,
+.native-command-search,
+.native-inline-completions {
+  border-color: var(--popover-border);
+  background: var(--surface-completion);
+  box-shadow: 0 12px 28px var(--shadow-popover);
+}
+
+.native-command-palette,
+.native-command-search,
+.native-inline-completions {
+  background: var(--surface-completion-native);
+}
+
+.native-command-search > header,
+.native-command-search > footer {
+  background: var(--surface-native-header);
+}
+
+.native-command-search__field {
+  border-color: var(--field-outline);
+  background: var(--surface-input);
+}
+
+.native-command-search > header > button:hover,
+.native-command-search > header > button:focus-visible {
+  background: var(--surface-hover);
+}
+
+.native-completion-option:hover,
+.native-completion-option.is-selected {
+  background: var(--surface-accent-selected);
+}
+
+.native-completion-option code {
+  color: var(--completion-code-text);
+}
+
+.completion-popover > button + button,
+.native-command-palette__options > button + button {
+  border-top-color: var(--border-subtle);
+}
+
+.completion-help,
+.native-command-palette__footer {
+  border-top-color: var(--border-subtle);
+  background: var(--surface-completion-footer);
+}
+
+.bottom-panel {
+  background: var(--surface-bottom);
+}
+
+.bottom-panel__resize-handle::before {
+  background: var(--resize-handle);
+}
+
+.bottom-panel__tabs button:not(.icon-button).is-active {
+  background: var(--surface-accent-soft);
+}
+
+.monitor-dashboard__region,
+.monitor-dashboard__table th {
+  background: var(--surface-card);
+}
+
+.monitor-dashboard__region-header {
+  background: var(--surface-card-header);
+}
+
+.status-bar {
+  background: var(--surface-status);
+}
+
+.connection-dialog,
+.settings-dialog {
+  background: var(--surface-scrim);
+}
+
+.native-dialog {
+  background: var(--surface-scrim-strong);
+}
+
+.connection-manager,
+.settings-panel,
+.native-dialog__panel {
+  border-color: var(--dialog-border);
+  background: var(--surface-dialog);
+  box-shadow: 0 24px 70px var(--shadow-dialog);
+}
+
+.connection-manager__header,
+.settings-panel__header,
+.native-dialog__header {
+  background: var(--surface-dialog-header);
+}
+
+.connection-manager__primary,
+.connection-form__submit,
+.settings-form__done,
+.native-dialog__primary {
+  color: var(--accent-foreground);
+}
+
+.connection-manager__server {
+  background: var(--surface-dialog-card-muted);
+}
+
+.connection-manager__server.is-active {
+  background: var(--surface-dialog-card-active);
+}
+
+.connection-form__notice {
+  background: var(--surface-accent-card);
+}
+
+.connection-form input,
+.connection-form select,
+.settings-form__color-control,
+.settings-form__wallpaper-file,
+.native-dialog input,
+.native-dialog select {
+  background: var(--surface-input);
+}
+
+.settings-form__section {
+  background: var(--surface-dialog-card);
+}
+
+.settings-form__upload {
+  color: var(--accent-soft-foreground);
+}
+
+.settings-form__preset > span {
+  border-color: var(--border-strong);
+}
+
+.native-command-palette__header,
+.native-dialog__summary,
+.native-dialog__footer {
+  background: var(--surface-native-header);
+}
+
+.native-dialog__request,
+.native-dialog__code {
+  background: var(--surface-code);
+}
+
+.native-dialog__code {
+  color: var(--code-text);
+}
+
+.native-transfer-row:hover,
+.native-dialog__close:hover {
+  background: var(--surface-hover);
+}
+
+.native-transfer-row--failed {
+  background: var(--surface-danger-soft);
+}
+
+.native-dialog__warning {
+  background: var(--surface-warning-soft);
+}
+
+.settings-update,
+.settings-close-behavior > label,
+.credential-save-option {
+  border-color: var(--border-default);
+  background: var(--surface-update);
+}
+
+.settings-close-behavior > label:has(input:checked) {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-update));
+}
+
+.settings-close-behavior > legend,
+.settings-update__version,
+.settings-update__details small,
+.settings-close-behavior small,
+.credential-save-option small,
+.native-credential-help,
+.connection-manager__credential {
+  color: var(--text-muted);
+}
+
+.settings-close-behavior strong,
+.settings-update__version strong,
+.settings-update__status,
+.credential-save-option > label,
+.native-credential-option {
+  color: var(--text-primary);
+}
+
+.settings-update__action {
+  color: var(--accent-soft-foreground);
+  background: color-mix(in srgb, var(--accent) 17%, var(--surface-update-strong));
+}
+
+.settings-update__action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 27%, var(--surface-update-strong));
+}
+
+.settings-update__action:disabled {
+  border-color: var(--border-default);
+  color: var(--text-muted);
+  background: var(--surface-update-disabled);
+}
+
+.credential-save-option {
+  background: var(--surface-credential);
+}
+
+.app-root[data-color-scheme="light"] .terminal-surface:not(.native-terminal-surface),
+.app-root[data-color-scheme="light"] .terminal-surface__empty {
+  background: var(--bg-terminal);
+}
+
+@media (forced-colors: active) {
+  .activity-rail__theme-menu button[aria-checked="true"] i {
+    forced-color-adjust: none;
+  }
+}

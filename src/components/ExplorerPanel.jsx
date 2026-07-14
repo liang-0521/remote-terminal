@@ -179,7 +179,7 @@ function NativeFileRow({ entry, onOpen, rowRef, tabIndex, onFocus, onMove }) {
     <>
       {entry.type === "directory" ? <CaretRight size={14} /> : <span className="tree-spacer" />}
       <Icon size={18} weight={entry.type === "directory" ? "fill" : "regular"} />
-      <span title={entry.name}>{entry.name}</span>
+      <span className="native-file-row__name" title={entry.name}>{entry.name}</span>
       <small>{entry.type === "file" ? formatFileSize(entry.size) : ""}</small>
     </>
   );
