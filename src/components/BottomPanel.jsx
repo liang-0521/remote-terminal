@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import {
   CaretDown,
   CaretUp,
@@ -9,7 +9,12 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { IconButton } from "./IconButton.jsx";
-import { MonitorDashboard } from "./MonitorDashboard.jsx";
+import { MonitorErrorBoundary } from "./MonitorErrorBoundary.js";
+
+function createLazyMonitorDashboard() {
+  return lazy(() => import("./MonitorDashboard.jsx")
+    .then(({ MonitorDashboard: component }) => ({ default: component })));
+}
 
 const TABS = [
   { id: "transfer", label: "传输" },
@@ -20,14 +25,27 @@ const TABS = [
 const MIN_PANEL_HEIGHT = 120;
 const MAX_PANEL_HEIGHT_RATIO = 0.45;
 
-export function BottomPanel({ activeTab, collapsed, transfers, servers, server, metrics, sampledAt, monitorLoading = false, monitorError = "", runtimeMode = "demo", issues = [], onTabChange, onToggle, onClose, onResize, onResetResize, onCancel, onRetry }) {
+export function BottomPanel({ activeTab, collapsed, transfers, servers, server, metrics, sampledAt, monitorLoading = false, monitorError = "", issues = [], onTabChange, onToggle, onClose, onResize, onResetResize, onCancel, onRetry }) {
   const dragState = useRef(null);
   const panelRef = useRef(null);
   const tabRefs = useRef([]);
   const panelId = useId();
   const [panelHeight, setPanelHeight] = useState(MIN_PANEL_HEIGHT);
+  const [monitorView, setMonitorView] = useState(() => ({
+    component: createLazyMonitorDashboard(),
+    attempt: 0,
+  }));
   const maxPanelHeight = Math.max(MIN_PANEL_HEIGHT, Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO));
   const announcedPanelHeight = Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight));
+  const MonitorDashboard = monitorView.component;
+  const monitorResetKey = `${server?.id || "no-server"}:${sampledAt}:${monitorView.attempt}`;
+
+  function retryMonitor() {
+    setMonitorView((current) => ({
+      component: createLazyMonitorDashboard(),
+      attempt: current.attempt + 1,
+    }));
+  }
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -141,8 +159,14 @@ export function BottomPanel({ activeTab, collapsed, transfers, servers, server, 
           tabIndex={0}
         >
           {activeTab === "transfer" && <TransferView transfers={transfers} servers={servers} onCancel={onCancel} onRetry={onRetry} />}
-          {activeTab === "issues" && <IssuesView transfers={transfers} runtimeMode={runtimeMode} issues={issues} />}
-          {activeTab === "monitor" && <MonitorDashboard server={server} metrics={metrics} sampledAt={sampledAt} loading={monitorLoading} error={monitorError} />}
+          {activeTab === "issues" && <IssuesView issues={issues} />}
+          {activeTab === "monitor" && (
+            <MonitorErrorBoundary resetKey={monitorResetKey} onRetry={retryMonitor}>
+              <Suspense fallback={<div className="monitor-dashboard monitor-dashboard--empty" role="status">正在加载监控视图…</div>}>
+                <MonitorDashboard server={server} metrics={metrics} sampledAt={sampledAt} loading={monitorLoading} error={monitorError} />
+              </Suspense>
+            </MonitorErrorBoundary>
+          )}
         </div>
       )}
     </section>
@@ -192,21 +216,12 @@ function TransferView({ transfers, servers, onCancel, onRetry }) {
   );
 }
 
-function IssuesView({ transfers, runtimeMode, issues }) {
-  if (runtimeMode === "native") {
-    return (
-      <div className="issues-list">
-        {issues.length ? issues.map((issue) => (
-          <div key={issue.id}><WarningCircle size={20} /><span><strong>{issue.title}</strong><small>{issue.detail}</small></span></div>
-        )) : <div><Info size={20} /><span><strong>当前没有问题</strong><small>真实连接、传输与采样错误会显示在这里。</small></span></div>}
-      </div>
-    );
-  }
-  const latestTransfer = transfers[0];
+function IssuesView({ issues }) {
   return (
     <div className="issues-list">
-      <div><WarningCircle size={20} /><span><strong>监控采样曾短暂延迟</strong><small>prod-web-01 · 已自动恢复，终端未受影响</small></span></div>
-      <div><Info size={20} /><span><strong>传输目标需要写入权限</strong><small>{latestTransfer?.target || "暂无传输任务"}</small></span></div>
+      {issues.length ? issues.map((issue) => (
+        <div key={issue.id}><WarningCircle size={20} /><span><strong>{issue.title}</strong><small>{issue.detail}</small></span></div>
+      )) : <div><Info size={20} /><span><strong>当前没有问题</strong><small>连接、传输与采样错误会显示在这里。</small></span></div>}
     </div>
   );
 }

@@ -13,6 +13,7 @@ import {
   User,
   X,
 } from "@phosphor-icons/react";
+import { useModalFocus } from "./useModalFocus.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -23,12 +24,6 @@ const EMPTY_FORM = {
   authMethod: "password",
   password: "",
   savePassword: false,
-};
-
-const DEMO_STATE_LABELS = {
-  connected: "模拟在线",
-  disconnected: "模拟离线",
-  connecting: "模拟连接中",
 };
 
 const NATIVE_STATE_LABELS = {
@@ -66,7 +61,6 @@ export function ConnectionDialog({
   initialView = "list",
   servers = [],
   activeServerId,
-  runtimeMode = "demo",
   onClose,
   onSelectServer,
   onCreateServer,
@@ -85,12 +79,14 @@ export function ConnectionDialog({
   const [deletingId, setDeletingId] = useState(null);
   const dialogRef = useRef(null);
   const firstActionRef = useRef(null);
-  const previousFocusRef = useRef(null);
-  const onCloseRef = useRef(onClose);
 
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+  useModalFocus({
+    open,
+    containerRef: dialogRef,
+    initialFocusRef: firstActionRef,
+    canClose: !submitting,
+    onClose,
+  });
 
   useEffect(() => {
     if (!open) {
@@ -113,43 +109,8 @@ export function ConnectionDialog({
     setActionError("");
     setDeleteConfirmId(null);
     setDeletingId(null);
-    const frame = window.requestAnimationFrame(() => firstActionRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
+    return undefined;
   }, [initialView, open]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    previousFocusRef.current = document.activeElement;
-
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        onCloseRef.current();
-        return;
-      }
-
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(dialogRef.current?.querySelectorAll(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ) || []);
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable.at(-1);
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      previousFocusRef.current?.focus();
-    };
-  }, [open]);
 
   if (!open) return null;
 
@@ -209,7 +170,7 @@ export function ConnectionDialog({
     try {
       await onCreateServer(connection, {
         password,
-        savePassword: runtimeMode === "native" && form.savePassword,
+        savePassword: form.savePassword,
       });
     } catch (error) {
       setSubmitError(error?.message || "无法保存或连接该服务器。请重试。" );
@@ -254,7 +215,7 @@ export function ConnectionDialog({
     <div
       className="connection-dialog"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (!submitting && event.target === event.currentTarget) onClose();
       }}
       role="presentation"
     >
@@ -277,14 +238,15 @@ export function ConnectionDialog({
               </h2>
               <p id="connection-manager-description">
                 {view === "list"
-                  ? (runtimeMode === "native" ? "选择已保存服务器，打开独立的真实工作区" : "选择一台服务器，打开独立的演示工作区")
-                  : (runtimeMode === "native" ? "连接配置会保存到本机；密码默认仅用于本次连接" : "配置服务器基础信息，密码仅用于当前表单演示")}
+                  ? "选择已保存服务器，打开独立工作区"
+                  : "连接配置会保存到本机；密码默认仅用于本次连接"}
               </p>
             </div>
           </div>
           <button
             type="button"
             className="connection-manager__close"
+            disabled={submitting}
             onClick={onClose}
             aria-label="关闭连接管理"
           >
@@ -314,8 +276,7 @@ export function ConnectionDialog({
               {actionError && <div className="connection-form__submit-error" role="alert">{actionError}</div>}
               {servers.length ? servers.map((server) => {
                 const isActive = server.id === activeServerId;
-                const stateLabels = runtimeMode === "native" ? NATIVE_STATE_LABELS : DEMO_STATE_LABELS;
-                const stateLabel = stateLabels[server.state] || "状态未知";
+                const stateLabel = NATIVE_STATE_LABELS[server.state] || "状态未知";
 
                 return (
                   <article
@@ -359,7 +320,7 @@ export function ConnectionDialog({
                           清除已保存密码
                         </button>
                       )}
-                      {runtimeMode === "native" && onDeleteServer && (
+                      {onDeleteServer && (
                         <button
                           type="button"
                           className={`connection-manager__delete ${deleteConfirmId === server.id ? "is-confirming" : ""}`}
@@ -380,7 +341,7 @@ export function ConnectionDialog({
                 <div className="connection-manager__empty">
                   <HardDrives size={32} weight="duotone" />
                   <strong>还没有保存的服务器</strong>
-                  <span>{runtimeMode === "native" ? "新增一个 SSH 连接开始使用。" : "新增一个 SSH 连接开始演示。"}</span>
+                  <span>新增一个 SSH 连接开始使用。</span>
                 </div>
               )}
             </div>
@@ -390,10 +351,8 @@ export function ConnectionDialog({
             <div className="connection-form__notice" role="note">
               <ShieldCheck size={20} weight="duotone" />
               <div>
-                <strong>{runtimeMode === "native" ? "原生安全连接" : "演示模式"}</strong>
-                <span>{runtimeMode === "native"
-                  ? "默认只用于本次连接；选择保存后，由当前 Windows 用户凭据加密，连接配置仍不含密码。"
-                  : "密码仅在当前表单内临时输入，不保存真实凭据；请勿输入真实密码。"}</span>
+                <strong>原生安全连接</strong>
+                <span>默认只用于本次连接；选择保存后，由当前 Windows 用户凭据加密，连接配置仍不含密码。</span>
               </div>
             </div>
 
@@ -479,8 +438,6 @@ export function ConnectionDialog({
                     onChange={updateField}
                   >
                     <option value="password">密码</option>
-                    {runtimeMode !== "native" && <option value="ssh-agent">SSH Agent</option>}
-                    {runtimeMode !== "native" && <option value="key-file">密钥文件（原生客户端选择）</option>}
                   </select>
                 </div>
               </Field>
@@ -495,7 +452,7 @@ export function ConnectionDialog({
                       type={passwordVisible ? "text" : "password"}
                       value={form.password}
                       onChange={updateField}
-                      placeholder={runtimeMode === "native" ? "输入本次 SSH 连接密码" : "仅输入测试值，请勿使用真实密码"}
+                      placeholder="输入本次 SSH 连接密码"
                       autoComplete="off"
                       aria-invalid={Boolean(errors.password)}
                       aria-describedby={errors.password ? "connection-password-error" : undefined}
@@ -515,7 +472,7 @@ export function ConnectionDialog({
                 </Field>
               )}
 
-              {runtimeMode === "native" && form.authMethod === "password" && (
+              {form.authMethod === "password" && (
                 <div className="credential-save-option connection-form__field--wide">
                   <label htmlFor="connection-savePassword">
                     <input
@@ -546,7 +503,7 @@ export function ConnectionDialog({
               </button>
               <button type="submit" className="connection-form__submit" disabled={submitting}>
                 <Plus size={17} weight="bold" />
-                {submitting ? "正在保存…" : runtimeMode === "native" ? "保存并连接" : "创建演示连接"}
+                {submitting ? "正在保存…" : "保存并连接"}
               </button>
             </footer>
           </form>

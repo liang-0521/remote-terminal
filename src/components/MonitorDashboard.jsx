@@ -19,6 +19,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { toMonitorPercent } from "../services/monitor-metrics.js";
 
 export function MonitorDashboard({ server, metrics, sampledAt, loading = false, error = "" }) {
   if (!metrics) {
@@ -31,8 +32,8 @@ export function MonitorDashboard({ server, metrics, sampledAt, loading = false, 
     );
   }
 
-  const memoryPercent = toPercent(metrics.memoryUsed, metrics.memoryTotal, "内存");
-  const swapPercent = metrics.swapTotal === 0 ? 0 : toPercent(metrics.swapUsed, metrics.swapTotal, "Swap");
+  const memoryPercent = toMonitorPercent(metrics.memoryUsed, metrics.memoryTotal, "内存");
+  const swapPercent = metrics.swapTotal === 0 ? 0 : toMonitorPercent(metrics.swapUsed, metrics.swapTotal, "Swap");
   const processes = Array.isArray(metrics.processes) ? metrics.processes : [];
   const mounts = Array.isArray(metrics.mounts) ? metrics.mounts : [];
   const history = Array.isArray(metrics.history) ? metrics.history : [];
@@ -121,7 +122,7 @@ export function MonitorDashboard({ server, metrics, sampledAt, loading = false, 
             </thead>
             <tbody>
               {mounts.map((mount) => {
-                const percent = toPercent(mount.used, mount.total, `挂载点 ${mount.path}`);
+                const percent = mount.percent;
                 return (
                   <tr key={mount.path}>
                     <td title={mount.path}>{mount.path}</td>
@@ -130,7 +131,7 @@ export function MonitorDashboard({ server, metrics, sampledAt, loading = false, 
                     <td>
                       <span className="monitor-dashboard__disk-usage">
                         <progress max="100" value={percent} aria-label={`${mount.path} 使用率`} />
-                        <b>{Math.round(percent)}%</b>
+                        <b>{percent}%</b>
                       </span>
                     </td>
                   </tr>
@@ -169,13 +170,6 @@ function ResourceUsage({ label, value, detail, icon }) {
       <progress max="100" value={value} aria-label={`${label} 使用率`} />
     </div>
   );
-}
-
-function toPercent(used, total, label) {
-  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
-    throw new TypeError(`${label} 的已用量和总量必须是有效数字，且总量必须大于 0`);
-  }
-  return Math.min(100, Math.max(0, (used / total) * 100));
 }
 
 function formatCapacity(value) {

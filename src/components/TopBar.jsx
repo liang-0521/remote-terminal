@@ -18,7 +18,7 @@ const NATIVE_CONNECTION_LABELS = {
   error: "连接失败",
 };
 
-export function TopBar({ server, servers, metrics, runtimeMode = "demo", menuOpen, onToggleMenu, onSelectServer, onAddServer, onToggleRail, onOpenMonitor }) {
+export function TopBar({ server, servers, metrics, menuOpen, onToggleMenu, onSelectServer, onAddServer, onToggleRail, onOpenMonitor }) {
   const pickerRef = useRef(null);
   const triggerRef = useRef(null);
   const menuItemRefs = useRef([]);
@@ -27,9 +27,9 @@ export function TopBar({ server, servers, metrics, runtimeMode = "demo", menuOpe
   const connected = server?.state === "connected";
   const memoryPercent = metrics && metrics.memoryTotal > 0 ? (metrics.memoryUsed / metrics.memoryTotal) * 100 : null;
   const swapPercent = metrics && metrics.swapTotal > 0 ? (metrics.swapUsed / metrics.swapTotal) * 100 : metrics?.swapTotal === 0 ? 0 : null;
-  const connectionLabel = runtimeMode === "native"
-    ? (server ? NATIVE_CONNECTION_LABELS[server.state] || "状态未知" : "未选择服务器")
-    : connected ? "模拟连接" : "模拟离线";
+  const connectionLabel = server
+    ? NATIVE_CONNECTION_LABELS[server.state] || "状态未知"
+    : "未选择服务器";
   const currentServerIndex = Math.max(0, servers.findIndex((item) => item.id === server?.id));
 
   useEffect(() => {

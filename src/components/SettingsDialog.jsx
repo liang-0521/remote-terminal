@@ -9,6 +9,7 @@ import {
   UploadSimple,
   X,
 } from "@phosphor-icons/react";
+import { useModalFocus } from "./useModalFocus.js";
 
 const MAX_WALLPAPER_BYTES = 8 * 1024 * 1024;
 
@@ -26,21 +27,15 @@ const ACCENT_PRESETS = [
   { name: "玫红色", value: "#ec4899" },
 ];
 
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled]):not([type=\"hidden\"]):not([hidden])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex=\"-1\"])",
-].join(",");
-
 export function SettingsDialog({
   open,
   theme,
   onThemeChange,
   onWallpaperChange,
   onRemoveWallpaper,
+  closeBehavior,
+  closeBehaviorError,
+  onCloseBehaviorChange,
   updateState,
   updateActionError,
   hasActiveTransfers = false,
@@ -53,61 +48,20 @@ export function SettingsDialog({
   const closeButtonRef = useRef(null);
   const fileInputRef = useRef(null);
   const readerRef = useRef(null);
-  const previousFocusRef = useRef(null);
-  const onCloseRef = useRef(onClose);
 
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+  useModalFocus({
+    open,
+    containerRef: panelRef,
+    initialFocusRef: closeButtonRef,
+    onClose,
+  });
 
   useEffect(() => {
     if (!open) return undefined;
-
-    previousFocusRef.current = document.activeElement;
     setFileError("");
-    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
-
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onCloseRef.current();
-        return;
-      }
-
-      if (event.key !== "Tab") return;
-
-      const focusable = Array.from(panelRef.current?.querySelectorAll(FOCUSABLE_SELECTOR) || [])
-        .filter((element) => element.getClientRects().length > 0);
-      if (!focusable.length) {
-        event.preventDefault();
-        panelRef.current?.focus();
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      const activeElement = document.activeElement;
-
-      if (!panelRef.current?.contains(activeElement)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      } else if (event.shiftKey && activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.removeEventListener("keydown", handleKeyDown);
       if (readerRef.current?.readyState === FileReader.LOADING) readerRef.current.abort();
       readerRef.current = null;
-      if (previousFocusRef.current?.isConnected) previousFocusRef.current.focus();
     };
   }, [open]);
 
@@ -345,6 +299,39 @@ export function SettingsDialog({
               <small>0% 最暗，100% 最清晰。</small>
             </label>
           </section>
+
+          {closeBehavior && (
+            <section className="settings-form__section" aria-labelledby="settings-close-title">
+              <div className="settings-form__section-heading">
+                <div>
+                  <h3 id="settings-close-title">关闭与后台运行</h3>
+                  <p>控制点击主窗口关闭按钮时的行为。</p>
+                </div>
+              </div>
+              <fieldset className="settings-close-behavior">
+                <legend>关闭主窗口时</legend>
+                {[
+                  ["ask", "每次询问", "关闭时选择后台运行或完全退出。"],
+                  ["background", "后台运行", "隐藏到系统托盘，SSH 和传输继续运行。"],
+                  ["exit", "直接退出", "关闭全部会话并结束客户端进程。"],
+                ].map(([value, label, description]) => (
+                  <label key={value} htmlFor={`settings-close-${value}`}>
+                    <input
+                      id={`settings-close-${value}`}
+                      type="radio"
+                      name="close-behavior"
+                      value={value}
+                      checked={closeBehavior === value}
+                      onChange={() => void onCloseBehaviorChange?.(value)}
+                    />
+                    <span><strong>{label}</strong><small>{description}</small></span>
+                  </label>
+                ))}
+              </fieldset>
+              <small className="settings-form__help">托盘图标始终提供“显示主窗口”和“退出”。</small>
+              {closeBehaviorError && <small className="settings-form__error" role="alert">{closeBehaviorError}</small>}
+            </section>
+          )}
 
           {updateState && (
             <section className="settings-form__section" aria-labelledby="settings-update-title">

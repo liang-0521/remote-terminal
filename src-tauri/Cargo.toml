@@ -1,0 +1,39 @@
+[package]
+name = "remote-terminal"
+version = "0.2.0"
+description = "Windows-native shell for Remote Terminal"
+authors = ["Liang"]
+edition = "2021"
+rust-version = "1.88.0"
+
+[lib]
+name = "remote_terminal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+atomic-write-file = "=0.3.0"
+bytes = "=1.12.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+keyring-core = "=1.0.0"
+russh = { version = "=0.62.2", default-features = false, features = ["ring"] }
+russh-sftp = "=2.3.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+tauri = { version = "=2.11.5", features = ["tray-icon"] }
+tauri-plugin-clipboard-manager = "=2.3.2"
+tauri-plugin-dialog = "=2.7.1"
+tauri-plugin-single-instance = "=2.4.3"
+tauri-plugin-updater = "=2.10.1"
+tokio = { version = "=1.52.3", features = ["fs", "io-util", "net", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "=1.23.5", features = ["v4"] }
+windows-native-keyring-store = "=1.1.0"
+
+[dev-dependencies]
+minisign-verify = "=0.2.5"
+tempfile = "=3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,7 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowsClockwise,
-  CaretDown,
   CaretRight,
   CloudArrowUp,
   FileText,
@@ -10,10 +9,9 @@ import {
   Link,
   Plus,
 } from "@phosphor-icons/react";
-import { formatFileSize, RELEASES } from "../demoData.js";
 import { IconButton } from "./IconButton.jsx";
 
-export function ExplorerPanel({ mode, server, servers, activeServerId, runtimeMode = "demo", fileState, onUpload, onRefresh, onNavigate, onOpenBottomTab, onCreateSession, onSelectServer, onOpenConnections }) {
+export function ExplorerPanel({ mode, server, servers, activeServerId, fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onRefresh, onNavigate, onOpenBottomTab, onCreateSession, onSelectServer, onOpenConnections }) {
   if (mode === "connections") {
     return <ConnectionsPanel servers={servers} activeServerId={activeServerId} onSelectServer={onSelectServer} onOpenConnections={onOpenConnections} />;
   }
@@ -21,53 +19,51 @@ export function ExplorerPanel({ mode, server, servers, activeServerId, runtimeMo
     return <ContextPanel mode={mode} server={server} onOpenBottomTab={onOpenBottomTab} onCreateSession={onCreateSession} />;
   }
 
-  return <RemoteFiles server={server} runtimeMode={runtimeMode} fileState={fileState} onUpload={onUpload} onRefresh={onRefresh} onNavigate={onNavigate} />;
+  return <RemoteFiles fileState={fileState} onUpload={onUpload} onSelectUploadFiles={onSelectUploadFiles} onNativeDragDropSubscribe={onNativeDragDropSubscribe} onRefresh={onRefresh} onNavigate={onNavigate} />;
 }
 
-function RemoteFiles({ server, runtimeMode, fileState, onUpload, onRefresh, onNavigate }) {
-  const inputRef = useRef(null);
-  const dragDepthRef = useRef(0);
-  const [expanded, setExpanded] = useState(true);
+function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onRefresh, onNavigate }) {
+  const shellRef = useRef(null);
+  const uploadRef = useRef(onUpload);
+  const fileRowRefs = useRef([]);
   const [dragging, setDragging] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [focusedFileRow, setFocusedFileRow] = useState(0);
+  uploadRef.current = onUpload;
 
-  function refresh() {
-    if (runtimeMode === "native") {
-      onRefresh?.();
-      return;
-    }
-    setRefreshing(true);
-    window.setTimeout(() => setRefreshing(false), 650);
-  }
+  useEffect(() => {
+    if (typeof onNativeDragDropSubscribe !== "function") return undefined;
+    const unsubscribe = onNativeDragDropSubscribe((event) => {
+      const shell = shellRef.current;
+      if (!shell) return;
+      if (event?.type === "leave") {
+        setDragging(false);
+        return;
+      }
+      const physicalX = Number(event?.position?.x);
+      const physicalY = Number(event?.position?.y);
+      const scale = window.devicePixelRatio || 1;
+      const x = physicalX / scale;
+      const y = physicalY / scale;
+      const rect = shell.getBoundingClientRect();
+      const inside = Number.isFinite(x) && Number.isFinite(y)
+        && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 
-  function receiveFiles(fileList) {
-    const files = Array.from(fileList || []);
-    if (files.length) onUpload(files);
-    setDragging(false);
-  }
+      if (["enter", "over"].includes(event?.type)) {
+        setDragging(inside);
+        return;
+      }
+      if (event?.type === "drop") {
+        setDragging(false);
+        if (inside && Array.isArray(event.paths) && event.paths.length) {
+          uploadRef.current?.(event.paths.map((localPath) => ({ localPath })));
+        }
+      }
+    });
+    return unsubscribe;
+  }, [onNativeDragDropSubscribe]);
 
-  function beginFileDrag(event) {
-    event.preventDefault();
-    if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
-    dragDepthRef.current += 1;
-    setDragging(true);
-  }
-
-  function leaveFileDrag(event) {
-    event.preventDefault();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDragging(false);
-  }
-
-  function dropFiles(event) {
-    event.preventDefault();
-    dragDepthRef.current = 0;
-    receiveFiles(event.dataTransfer.files);
-  }
-
-  const native = runtimeMode === "native";
-  const currentPath = native ? fileState?.path : server.directory;
-  const isRefreshing = native ? Boolean(fileState?.loading) : refreshing;
+  const currentPath = fileState?.path;
+  const isRefreshing = Boolean(fileState?.loading);
   const parentPath = currentPath && currentPath !== "/"
     ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/"
     : null;
@@ -78,6 +74,36 @@ function RemoteFiles({ server, runtimeMode, fileState, onUpload, onRefresh, onNa
       : currentPath
         ? `已显示远程路径 ${currentPath}`
         : "SFTP 不可用";
+  const rows = [
+    ...(parentPath ? [{
+      key: "parent:..",
+      entry: { name: "..", type: "directory", size: 0 },
+      onOpen: () => onNavigate?.(parentPath),
+    }] : []),
+    ...(fileState?.entries || []).map((entry) => ({
+      key: `${entry.type}:${entry.name}`,
+      entry,
+      onOpen: entry.type === "directory"
+        ? () => onNavigate?.(`${currentPath === "/" ? "" : currentPath}/${entry.name}`)
+        : undefined,
+    })),
+  ];
+
+  useEffect(() => {
+    setFocusedFileRow((current) => Math.min(current, Math.max(rows.length - 1, 0)));
+  }, [rows.length]);
+
+  function moveFileRowFocus(event, currentIndex) {
+    if (!rows.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? rows.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+    setFocusedFileRow(nextIndex);
+    window.requestAnimationFrame(() => fileRowRefs.current[nextIndex]?.focus());
+  }
 
   return (
     <aside className="explorer-panel" aria-label="远程文件">
@@ -87,10 +113,13 @@ function RemoteFiles({ server, runtimeMode, fileState, onUpload, onRefresh, onNa
       <div className="section-heading">
         <h3>远程文件</h3>
         <span>
-          <IconButton label="刷新远程文件" onClick={refresh} className={isRefreshing ? "is-spinning" : ""}>
+          <IconButton label="刷新远程文件" onClick={onRefresh} className={isRefreshing ? "is-spinning" : ""}>
             <ArrowsClockwise size={19} />
           </IconButton>
-          <IconButton label="选择文件上传" onClick={() => inputRef.current?.click()}>
+          <IconButton
+            label="选择文件上传"
+            onClick={() => void onSelectUploadFiles?.()}
+          >
             <CloudArrowUp size={19} />
           </IconButton>
         </span>
@@ -100,42 +129,28 @@ function RemoteFiles({ server, runtimeMode, fileState, onUpload, onRefresh, onNa
       </div>
 
       <div
+        ref={shellRef}
         className={`file-tree-shell ${dragging ? "is-dragging" : ""}`}
-        onDragEnter={beginFileDrag}
-        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
-        onDragLeave={leaveFileDrag}
-        onDrop={dropFiles}
       >
-        <div className={`file-tree ${isRefreshing ? "is-refreshing" : ""}`} aria-label="远程文件列表，可拖放上传" aria-busy={isRefreshing}>
-          {native ? (
-            <>
-              {parentPath && <NativeFileRow entry={{ name: "..", type: "directory", size: 0 }} onOpen={() => onNavigate?.(parentPath)} />}
-              {fileState?.error && <div className="file-tree__message is-error" role="alert">{fileState.error}</div>}
-              {!fileState?.error && !fileState?.loading && fileState?.entries?.length === 0 && <div className="file-tree__message">此目录为空</div>}
-              {(fileState?.entries || []).map((entry) => (
-                <NativeFileRow
-                  key={`${entry.type}:${entry.name}`}
-                  entry={entry}
-                  onOpen={entry.type === "directory" ? () => onNavigate?.(`${currentPath === "/" ? "" : currentPath}/${entry.name}`) : undefined}
-                />
-              ))}
-            </>
-          ) : (
-            <>
-              <TreeRow depth={0} label="/" icon="branch" expanded />
-              <TreeRow depth={1} label="var" icon="branch" expanded />
-              <TreeRow depth={2} label="www" icon="branch" expanded />
-              <TreeRow depth={3} label="app" icon="branch" expanded />
-              <button type="button" className="tree-row is-selected" style={{ "--depth": 4 }} onClick={() => setExpanded((value) => !value)}>
-                {expanded ? <CaretDown size={14} /> : <CaretRight size={14} />}
-                <span className="tree-icon-spacer" />
-                <span>releases</span>
-              </button>
-              {expanded && RELEASES.map((release) => <TreeRow key={release} depth={5} label={release} icon="folder" />)}
-              <TreeRow depth={3} label="current → 20260714_101530" icon="link" />
-              <TreeRow depth={3} label=".release.lock" icon="file" />
-            </>
-          )}
+        <div
+          className={`file-tree ${isRefreshing ? "is-refreshing" : ""}`}
+          role="tree"
+          aria-label="远程文件列表，可拖放上传"
+          aria-busy={isRefreshing}
+        >
+          {fileState?.error && <div className="file-tree__message is-error" role="alert">{fileState.error}</div>}
+          {!fileState?.error && !fileState?.loading && fileState?.entries?.length === 0 && <div className="file-tree__message">此目录为空</div>}
+          {rows.map(({ key, entry, onOpen }, index) => (
+            <NativeFileRow
+              key={key}
+              entry={entry}
+              onOpen={onOpen}
+              rowRef={(element) => { fileRowRefs.current[index] = element; }}
+              tabIndex={focusedFileRow === index ? 0 : -1}
+              onFocus={() => setFocusedFileRow(index)}
+              onMove={(event) => moveFileRowFocus(event, index)}
+            />
+          ))}
         </div>
         {dragging && (
           <div className="file-tree__drop-overlay" role="status">
@@ -144,14 +159,20 @@ function RemoteFiles({ server, runtimeMode, fileState, onUpload, onRefresh, onNa
             <span>{currentPath}</span>
           </div>
         )}
-        <input ref={inputRef} type="file" multiple hidden onChange={(event) => { receiveFiles(event.target.files); event.currentTarget.value = ""; }} />
       </div>
       <span className="file-tree__status" role="status" aria-live="polite" aria-atomic="true">{liveStatus}</span>
     </aside>
   );
 }
 
-function NativeFileRow({ entry, onOpen }) {
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** unitIndex).toFixed(unitIndex > 1 ? 1 : 0)} ${units[unitIndex]}`;
+}
+
+function NativeFileRow({ entry, onOpen, rowRef, tabIndex, onFocus, onMove }) {
   const Icon = entry.type === "directory" ? Folder : entry.type === "symlink" ? Link : FileText;
   const parentEntry = entry.name === "..";
   const content = (
@@ -162,15 +183,20 @@ function NativeFileRow({ entry, onOpen }) {
       <small>{entry.type === "file" ? formatFileSize(entry.size) : ""}</small>
     </>
   );
-  if (!onOpen) return <div className="tree-row native-file-row">{content}</div>;
+  if (!onOpen) return <div ref={rowRef} className="tree-row native-file-row is-static" role="treeitem" tabIndex={tabIndex} onFocus={onFocus} onKeyDown={onMove}>{content}</div>;
   return (
     <button
+      ref={rowRef}
       type="button"
       className="tree-row native-file-row"
+      role="treeitem"
+      tabIndex={tabIndex}
+      onFocus={onFocus}
       onClick={parentEntry ? onOpen : undefined}
       onKeyDown={(event) => {
-        if (event.key !== "Enter" || parentEntry) return;
-        event.preventDefault();
+        onMove(event);
+        if (!["Enter", " "].includes(event.key)) return;
+        if (!event.defaultPrevented) event.preventDefault();
         onOpen();
       }}
       onDoubleClick={parentEntry ? undefined : onOpen}
@@ -208,18 +234,6 @@ function ConnectionsPanel({ servers, activeServerId, onSelectServer, onOpenConne
         <HardDrives size={19} /> 管理连接与密码
       </button>
     </aside>
-  );
-}
-
-function TreeRow({ depth, label, icon, expanded = false }) {
-  const Icon = icon === "file" ? FileText : icon === "link" ? Link : Folder;
-  const branch = icon === "branch";
-  return (
-    <button type="button" className="tree-row" style={{ "--depth": depth }}>
-      {branch || icon === "folder" ? (expanded ? <CaretDown size={14} /> : <span className="tree-spacer" />) : <span className="tree-spacer" />}
-      {branch ? <span className="tree-icon-spacer" /> : <Icon size={18} weight={icon === "folder" ? "fill" : "regular"} />}
-      <span>{label}</span>
-    </button>
   );
 }
 

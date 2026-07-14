@@ -9,6 +9,66 @@
   background: rgba(7, 21, 37, 0.5);
 }
 
+.settings-close-behavior {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-close-behavior > legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  padding: 0;
+  color: #a8b8ca;
+  font-size: 12px;
+}
+
+.settings-close-behavior > label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(133, 159, 190, 0.2);
+  border-radius: 8px;
+  background: rgba(7, 21, 37, 0.5);
+  cursor: pointer;
+}
+
+.settings-close-behavior > label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, rgba(7, 21, 37, 0.5));
+}
+
+.settings-close-behavior input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.settings-close-behavior span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-close-behavior strong {
+  color: #eaf1f9;
+  font-size: 13px;
+}
+
+.settings-close-behavior small {
+  color: #71869e;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .settings-update__details {
   min-width: 0;
   display: grid;
@@ -91,6 +151,10 @@
 }
 
 @media (max-width: 720px) {
+  .settings-close-behavior {
+    grid-template-columns: 1fr;
+  }
+
   .settings-update {
     align-items: stretch;
     flex-direction: column;

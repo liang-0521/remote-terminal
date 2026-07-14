@@ -61,6 +61,102 @@ body {
   height: 100%;
 }
 
+.app-error-boundary {
+  display: grid;
+  place-items: center;
+  width: 100vw;
+  height: 100vh;
+  padding: 32px;
+  color: var(--text-primary);
+  background:
+    radial-gradient(circle at 50% 30%, rgb(157 132 248 / 8%), transparent 42%),
+    var(--bg-app);
+}
+
+.app-error-boundary__panel {
+  display: grid;
+  justify-items: center;
+  width: min(620px, 100%);
+  padding: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  text-align: center;
+  background: var(--bg-panel);
+  box-shadow: 0 20px 54px rgb(0 0 0 / 38%);
+}
+
+.app-error-boundary__mark {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgb(255 123 134 / 42%);
+  border-radius: 50%;
+  color: var(--danger);
+  background: rgb(255 123 134 / 8%);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.app-error-boundary h1 {
+  margin: 16px 0 8px;
+  color: var(--text-strong);
+  font-size: 22px;
+}
+
+.app-error-boundary p {
+  max-width: 500px;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.app-error-boundary__details {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  margin-top: 20px;
+  padding: 12px 14px;
+  border: 1px solid rgb(255 123 134 / 24%);
+  border-radius: 7px;
+  text-align: left;
+  background: rgb(255 123 134 / 5%);
+}
+
+.app-error-boundary__details span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.app-error-boundary__details code {
+  overflow-wrap: anywhere;
+  color: #ffb2b9;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.app-error-boundary button {
+  min-height: 38px;
+  margin-top: 20px;
+  padding: 0 16px;
+  border: 1px solid var(--accent-muted);
+  border-radius: 6px;
+  color: #f0ecff;
+  background: color-mix(in srgb, var(--accent), black 42%);
+  cursor: pointer;
+}
+
+.app-error-boundary button:hover {
+  background: color-mix(in srgb, var(--accent), black 30%);
+}
+
+.app-error-boundary small {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 button,
 input,
 select {
@@ -476,6 +572,15 @@ select:focus-visible {
 
 .tree-row:hover {
   background: rgb(255 255 255 / 4%);
+}
+
+.tree-row[role="treeitem"]:focus-visible {
+  outline: 2px solid rgb(157 132 248 / 70%);
+  outline-offset: -2px;
+}
+
+.tree-row.is-static {
+  cursor: default;
 }
 
 .tree-row.is-selected {

@@ -1,42 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListBullets, Plus, Terminal as TerminalIcon, X } from "@phosphor-icons/react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import {
+  buildCommandCompletionCatalog,
+  advanceTerminalInputState,
+  createTerminalCompletionInput,
+  createTerminalInputState,
+  isImeCompositionKeyEvent,
+  nextCommandCompletionIndex,
+  resolveInlineCompletionKeyAction,
+  searchCommandCompletions,
+} from "../services/command-completion.js";
 import { IconButton } from "./IconButton.jsx";
-
-const COMMAND_SUGGESTIONS = [
-  { command: "ls -lah", description: "查看当前目录详细内容", group: "文件" },
-  { command: "cd /var/log", description: "进入系统日志目录", group: "文件" },
-  { command: "find . -type f -name '*.log'", description: "按名称查找日志文件", group: "文件" },
-  { command: "grep -Rni -- 'ERROR' .", description: "递归查找错误内容", group: "文件" },
-  { command: "tail -f /var/log/messages", description: "持续查看系统日志", group: "日志" },
-  { command: "journalctl -xe", description: "查看近期系统错误", group: "日志" },
-  { command: "journalctl -u nginx -f", description: "持续查看 nginx 服务日志", group: "日志" },
-  { command: "systemctl status nginx", description: "查看 nginx 服务状态", group: "服务" },
-  { command: "systemctl list-units --failed", description: "查看启动失败的服务", group: "服务" },
-  { command: "ps aux --sort=-%cpu | head", description: "查看 CPU 占用最高的进程", group: "性能" },
-  { command: "free -h", description: "查看内存与 Swap", group: "性能" },
-  { command: "df -h", description: "查看文件系统容量", group: "性能" },
-  { command: "ss -lntp", description: "查看正在监听的 TCP 端口", group: "网络" },
-  { command: "ip address", description: "查看网络接口与地址", group: "网络" },
-  { command: "docker ps", description: "查看运行中的容器", group: "容器" },
-  { command: "docker compose ps", description: "查看 Compose 服务状态", group: "容器" },
-];
-const CLEAR_CURRENT_LINE = "\u0001\u000b";
-
-function matchingCommands(query) {
-  const normalized = query.trim().toLocaleLowerCase("zh-CN");
-  if (!normalized) return COMMAND_SUGGESTIONS.slice(0, 8);
-  return COMMAND_SUGGESTIONS
-    .filter((item) => `${item.command} ${item.description} ${item.group}`.toLocaleLowerCase("zh-CN").includes(normalized))
-    .sort((left, right) => {
-      const leftPrefix = left.command.toLocaleLowerCase("zh-CN").startsWith(normalized) ? 0 : 1;
-      const rightPrefix = right.command.toLocaleLowerCase("zh-CN").startsWith(normalized) ? 0 : 1;
-      return leftPrefix - rightPrefix;
-    })
-    .slice(0, 8);
-}
 
 export function NativeTerminalPane({
   client,
@@ -49,6 +26,22 @@ export function NativeTerminalPane({
   onTerminalError,
 }) {
   const tabRefs = useRef([]);
+  const keyboardTabTargetRef = useRef(null);
+
+  useEffect(() => {
+    const targetId = keyboardTabTargetRef.current;
+    if (!targetId || targetId !== activeSessionId) return undefined;
+    const targetIndex = sessions.findIndex((session) => session.id === targetId);
+    if (targetIndex < 0) {
+      keyboardTabTargetRef.current = null;
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      tabRefs.current[targetIndex]?.focus();
+      keyboardTabTargetRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, sessions]);
 
   function selectRelativeSession(event, currentIndex) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -60,8 +53,8 @@ export function NativeTerminalPane({
         : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + sessions.length) % sessions.length;
     const nextSession = sessions[nextIndex];
     if (!nextSession) return;
+    keyboardTabTargetRef.current = nextSession.id;
     onSessionSelect(nextSession.id);
-    window.requestAnimationFrame(() => tabRefs.current[nextIndex]?.focus());
   }
 
   function selectNextSession(event) {
@@ -140,7 +133,12 @@ export function NativeTerminalPane({
                 sessionId={session.sessionId}
                 connectionId={session.id}
                 active={activeSessionId === session.id}
+                focusTerminalOnActivate={keyboardTabTargetRef.current !== session.id}
                 appearance={appearance}
+                remoteCompletions={session.completionCatalog}
+                completionLoading={session.completionLoading}
+                completionError={session.completionError}
+                directoryEntries={session.directoryEntries}
                 onError={onTerminalError}
               />
             ) : (
@@ -157,33 +155,120 @@ export function NativeTerminalPane({
   );
 }
 
-function XtermSurface({ client, sessionId, connectionId, active, appearance, onError }) {
+function XtermSurface({
+  client,
+  sessionId,
+  connectionId,
+  active,
+  focusTerminalOnActivate,
+  appearance,
+  remoteCompletions,
+  completionLoading,
+  completionError,
+  directoryEntries,
+  onError,
+}) {
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
+  const terminalWriteQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
-  const paletteInputRef = useRef(null);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [paletteQuery, setPaletteQuery] = useState("");
-  const [paletteIndex, setPaletteIndex] = useState(0);
-  const suggestions = matchingCommands(paletteQuery);
-  const selectedSuggestionIndex = suggestions.length ? Math.min(paletteIndex, suggestions.length - 1) : -1;
-  const paletteId = `native-command-palette-${connectionId}`;
-  const selectedOptionId = selectedSuggestionIndex >= 0 ? `${paletteId}-option-${selectedSuggestionIndex}` : undefined;
+  const completionCatalogRef = useRef([]);
+  const completionOpenRef = useRef(false);
+  const terminalInputRef = useRef(createTerminalInputState());
+  const suggestionIndexRef = useRef(0);
+  const suggestionsRef = useRef([]);
+  const [completionOpen, setCompletionOpen] = useState(false);
+  const [terminalInput, setTerminalInput] = useState(() => createTerminalInputState());
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const completionCatalog = useMemo(() => buildCommandCompletionCatalog({
+    remoteCompletions,
+    directoryEntries,
+  }), [directoryEntries, remoteCompletions]);
+  const suggestions = useMemo(
+    () => terminalInput.reliable
+      ? searchCommandCompletions(terminalInput.text, { completions: completionCatalog })
+      : [],
+    [completionCatalog, terminalInput],
+  );
+  const selectedSuggestionIndex = suggestions.length ? Math.min(suggestionIndex, suggestions.length - 1) : -1;
+  const completionId = `native-inline-completions-${connectionId}`;
+  const selectedOptionId = selectedSuggestionIndex >= 0 ? `${completionId}-option-${selectedSuggestionIndex}` : undefined;
+  completionCatalogRef.current = completionCatalog;
+  suggestionsRef.current = suggestions;
+  suggestionIndexRef.current = selectedSuggestionIndex;
+
+  const focusTerminalSoon = useCallback(() => {
+    window.requestAnimationFrame(() => terminalRef.current?.focus());
+  }, []);
+
+  const closeCompletion = useCallback(() => {
+    completionOpenRef.current = false;
+    suggestionIndexRef.current = 0;
+    setCompletionOpen(false);
+    setSuggestionIndex(0);
+  }, []);
+
+  const toggleCompletion = useCallback(() => {
+    const nextOpen = !completionOpenRef.current;
+    completionOpenRef.current = nextOpen;
+    suggestionIndexRef.current = 0;
+    setCompletionOpen(nextOpen);
+    setSuggestionIndex(0);
+    focusTerminalSoon();
+  }, [focusTerminalSoon]);
+
+  const trackTerminalInput = useCallback((data) => {
+    const nextState = advanceTerminalInputState(terminalInputRef.current, data);
+    terminalInputRef.current = nextState;
+    suggestionsRef.current = nextState.reliable
+      ? searchCommandCompletions(nextState.text, { completions: completionCatalogRef.current })
+      : [];
+    suggestionIndexRef.current = 0;
+    setTerminalInput(nextState);
+    setSuggestionIndex(0);
+    if (!nextState.reliable || /[\r\n\u0003]/.test(data)) closeCompletion();
+  }, [closeCompletion]);
+
+  const enqueueTerminalWrite = useCallback((data) => {
+    const request = terminalWriteQueueRef.current.then(() => client.terminal.write(sessionId, data));
+    terminalWriteQueueRef.current = request.catch(() => undefined);
+    return request;
+  }, [client, sessionId]);
+
+  const insertCompletion = useCallback((command) => {
+    const input = createTerminalCompletionInput(terminalInputRef.current, command);
+    if (!input) {
+      closeCompletion();
+      focusTerminalSoon();
+      return;
+    }
+    const nextState = { reliable: true, text: command };
+    terminalInputRef.current = nextState;
+    setTerminalInput(nextState);
+    closeCompletion();
+    void enqueueTerminalWrite(input)
+      .then(focusTerminalSoon)
+      .catch((error) => {
+        const unreliableState = { reliable: false, text: "" };
+        terminalInputRef.current = unreliableState;
+        setTerminalInput(unreliableState);
+        onError?.(error, connectionId);
+      });
+  }, [closeCompletion, connectionId, enqueueTerminalWrite, focusTerminalSoon, onError]);
 
   useEffect(() => {
     activeRef.current = active;
     if (!active) {
-      setPaletteOpen(false);
-      setPaletteQuery("");
+      closeCompletion();
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
       fitRef.current?.fit();
-      terminalRef.current?.focus();
+      if (focusTerminalOnActivate) terminalRef.current?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active]);
+  }, [active, closeCompletion, focusTerminalOnActivate]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -194,12 +279,6 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
       selectionBackground: `${appearance.accent}55`,
     };
   }, [appearance.accent, appearance.terminalBackground, appearance.terminalForeground]);
-
-  useEffect(() => {
-    if (!paletteOpen) return undefined;
-    const frame = window.requestAnimationFrame(() => paletteInputRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [paletteOpen]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -232,16 +311,14 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type !== "keydown" || event.isComposing) return true;
+      if (event.type !== "keydown" || isImeCompositionKeyEvent(event)) return true;
       const ctrlShortcut = event.ctrlKey && !event.altKey && !event.metaKey;
-      const opensPalette = ctrlShortcut && (
+      const togglesCompletion = ctrlShortcut && (
         (event.shiftKey && event.code === "KeyP")
         || (!event.shiftKey && event.code === "Space")
       );
-      if (opensPalette) {
-        setPaletteQuery("");
-        setPaletteIndex(0);
-        setPaletteOpen(true);
+      if (togglesCompletion) {
+        toggleCompletion();
         return false;
       }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyC") {
@@ -260,6 +337,37 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
           .catch((error) => onError?.(error, connectionId));
         return false;
       }
+
+      const currentSuggestions = suggestionsRef.current;
+      const keyAction = resolveInlineCompletionKeyAction({
+        key: event.key,
+        open: completionOpenRef.current,
+        reliable: terminalInputRef.current.reliable,
+        suggestionCount: currentSuggestions.length,
+      });
+      if (keyAction === "close") {
+        closeCompletion();
+        return false;
+      }
+      if (keyAction === "execute") {
+        closeCompletion();
+        return true;
+      }
+      if (keyAction === "navigate") {
+        const currentIndex = Math.max(0, Math.min(suggestionIndexRef.current, currentSuggestions.length - 1));
+        const nextIndex = nextCommandCompletionIndex(currentIndex, event.key, currentSuggestions.length);
+        if (nextIndex !== null) {
+          suggestionIndexRef.current = nextIndex;
+          setSuggestionIndex(nextIndex);
+        }
+        return false;
+      }
+      if (keyAction === "insert") {
+        const currentIndex = Math.max(0, Math.min(suggestionIndexRef.current, currentSuggestions.length - 1));
+        insertCompletion(currentSuggestions[currentIndex].command);
+        return false;
+      }
+      if (completionOpenRef.current && event.key === "Tab") closeCompletion();
       return true;
     });
 
@@ -271,7 +379,8 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
       else terminal.write(event.data);
     });
     const inputSubscription = terminal.onData((data) => {
-      void client.terminal.write(sessionId, data).catch((error) => onError?.(error, connectionId));
+      trackTerminalInput(data);
+      void enqueueTerminalWrite(data).catch((error) => onError?.(error, connectionId));
     });
     const resizeSubscription = terminal.onResize(({ cols, rows }) => {
       if (!activeRef.current) return;
@@ -306,42 +415,7 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, connectionId, sessionId, onError]);
-
-  function closePalette() {
-    setPaletteOpen(false);
-    setPaletteQuery("");
-    setPaletteIndex(0);
-    window.requestAnimationFrame(() => terminalRef.current?.focus());
-  }
-
-  function insertCommand(command) {
-    setPaletteOpen(false);
-    setPaletteQuery("");
-    setPaletteIndex(0);
-    void client.terminal.write(sessionId, `${CLEAR_CURRENT_LINE}${command}`)
-      .then(() => window.requestAnimationFrame(() => terminalRef.current?.focus()))
-      .catch((error) => onError?.(error, connectionId));
-  }
-
-  function handlePaletteKeyDown(event) {
-    if (event.isComposing) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closePalette();
-      return;
-    }
-    if (["ArrowDown", "ArrowUp"].includes(event.key)) {
-      event.preventDefault();
-      const delta = event.key === "ArrowDown" ? 1 : -1;
-      setPaletteIndex((current) => (current + delta + Math.max(suggestions.length, 1)) % Math.max(suggestions.length, 1));
-      return;
-    }
-    if (["Enter", "Tab"].includes(event.key) && suggestions.length) {
-      event.preventDefault();
-      insertCommand(suggestions[selectedSuggestionIndex].command);
-    }
-  }
+  }, [client, closeCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, sessionId, toggleCompletion, trackTerminalInput]);
 
   return (
     <>
@@ -349,57 +423,65 @@ function XtermSurface({ client, sessionId, connectionId, active, appearance, onE
       <button
         type="button"
         className="native-completion-trigger"
-        aria-expanded={paletteOpen}
-        aria-controls={paletteId}
-        aria-haspopup="dialog"
+        aria-expanded={completionOpen}
+        aria-controls={completionId}
+        aria-haspopup="listbox"
         aria-keyshortcuts="Control+Shift+P Control+Space"
-        aria-label="打开命令模板，快捷键 Ctrl+Shift+P，兼容 Ctrl+Space"
-        onClick={() => {
-          setPaletteQuery("");
-          setPaletteIndex(0);
-          setPaletteOpen(true);
-        }}
+        aria-label={`${completionOpen ? "关闭" : "打开"}行内智能补全，快捷键 Ctrl+Shift+P，兼容 Ctrl+Space`}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={toggleCompletion}
       >
-        <ListBullets size={15} /> 命令模板 <kbd>Ctrl+Shift+P</kbd>
+        <ListBullets size={15} /> 智能补全{completionLoading ? "（加载中）" : completionError ? "（部分可用）" : ""} <kbd>Ctrl+Shift+P</kbd>
       </button>
-      {paletteOpen && active && (
-        <div id={paletteId} className="completion-popover native-command-palette" role="dialog" aria-label="本地命令模板">
-          <div className="native-command-palette__search">
-            <ListBullets size={17} />
-            <input
-              ref={paletteInputRef}
-              value={paletteQuery}
-              placeholder="搜索命令、用途或分类"
-              role="combobox"
-              aria-label="搜索命令模板"
-              aria-autocomplete="list"
-              aria-controls={`${paletteId}-options`}
-              aria-expanded="true"
-              aria-activedescendant={selectedOptionId}
-              onChange={(event) => { setPaletteQuery(event.target.value); setPaletteIndex(0); }}
-              onKeyDown={handlePaletteKeyDown}
-            />
+      {completionOpen && active && (
+        <div id={completionId} className="native-inline-completions" aria-label="终端行内智能补全">
+          <header>
+            <span>
+              <ListBullets size={17} />
+              <strong>{terminalInput.reliable ? "基于当前输入实时匹配" : "当前行不可可靠补全"}</strong>
+            </span>
             <kbd>Esc</kbd>
-          </div>
-          <div id={`${paletteId}-options`} className="native-command-palette__options" role="listbox" aria-label="匹配的命令模板">
-            {suggestions.length ? suggestions.map((item, index) => (
+          </header>
+          {terminalInput.reliable ? (
+            <div
+              id={`${completionId}-options`}
+              className="native-inline-completions__options"
+              role="listbox"
+              aria-label="匹配当前终端输入的补全"
+              aria-activedescendant={selectedOptionId}
+            >
+              {suggestions.length ? suggestions.map((item, index) => (
               <button
                 key={item.command}
-                id={`${paletteId}-option-${index}`}
+                id={`${completionId}-option-${index}`}
                 type="button"
                 role="option"
+                tabIndex={-1}
                 aria-selected={selectedSuggestionIndex === index}
                 className={selectedSuggestionIndex === index ? "is-selected" : ""}
-                onMouseEnter={() => setPaletteIndex(index)}
-                onClick={() => insertCommand(item.command)}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => {
+                  suggestionIndexRef.current = index;
+                  setSuggestionIndex(index);
+                }}
+                onClick={() => insertCompletion(item.command)}
               >
                 <code>{item.command}</code>
                 <span>{item.description}</span>
-                <small>{item.group}</small>
+                <small>{item.sourceLabel || item.group}</small>
               </button>
-            )) : <div className="completion-empty">没有匹配的命令模板</div>}
-          </div>
-          <footer>↑/↓ 选择 · Enter/Tab 插入 · Esc 关闭；仅在 Shell 提示符使用，不会自动执行</footer>
+              )) : <div className="native-inline-completions__empty">当前输入没有匹配的补全候选</div>}
+            </div>
+          ) : (
+            <div className="native-inline-completions__empty">
+              当前行经过了光标移动、远端 Tab 补全或未知控制输入。请按 Enter 或 Ctrl+C 建立新输入行后再试。
+            </div>
+          )}
+          <footer>
+            {completionLoading && "正在加载远端命令与 Shell 历史；内置语义和当前目录候选已可用。 "}
+            {completionError && `远端补全加载失败：${completionError}；内置语义和当前目录候选仍可用。 `}
+            ↑/↓ 选择 · Tab 插入 · Enter 执行当前行 · Esc 关闭；命令数据不离开本机与当前 SSH 会话
+          </footer>
         </div>
       )}
     </>

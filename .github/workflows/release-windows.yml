@@ -1,15 +1,12 @@
 name: Release Windows
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       release_tag:
         description: "Existing version tag to publish"
         required: true
-        default: "v0.1.0"
+        default: "v0.2.0"
         type: string
 
 permissions:
@@ -18,11 +15,19 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    environment:
+      name: release
+    defaults:
+      run:
+        shell: pwsh
+
     steps:
-      - name: Checkout source
+      - name: Checkout release tag
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -30,42 +35,301 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Verify release target
-        shell: pwsh
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Verify release target and updater configuration
         env:
           DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
-          $version = node -p "require('./package.json').version"
+          $ErrorActionPreference = "Stop"
+          $expectedVersion = "0.2.0"
+          $expectedTag = "v$expectedVersion"
+          $expectedUpdaterEndpoint = "https://github.com/liang-0521/remote-terminal/releases/latest/download/latest.json"
+
           $releaseTag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
             $env:DISPATCH_TAG
           } else {
             $env:GITHUB_REF_NAME
           }
-          if ($releaseTag -ne "v$version") {
-            throw "Tag $releaseTag does not match package version v$version"
+          if ($releaseTag -ne $expectedTag) {
+            throw "Release tag '$releaseTag' must be '$expectedTag'."
           }
-          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
 
-      - name: Install dependencies
+          $tagCommit = (git rev-list -n 1 $releaseTag).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit)) {
+            throw "Release tag '$releaseTag' does not exist."
+          }
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($tagCommit -ne $headCommit) {
+            throw "Checked out commit '$headCommit' does not match tag '$releaseTag' at '$tagCommit'."
+          }
+
+          $packageVersion = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+
+          $cargoLines = Get-Content -LiteralPath "src-tauri/Cargo.toml"
+          $cargoVersion = $null
+          $insidePackage = $false
+          foreach ($line in $cargoLines) {
+            if ($line -match '^\s*\[package\]\s*$') {
+              $insidePackage = $true
+              continue
+            }
+            if ($insidePackage -and $line -match '^\s*\[') {
+              break
+            }
+            if ($insidePackage -and $line -match '^\s*version\s*=\s*"([^"]+)"\s*$') {
+              $cargoVersion = $Matches[1]
+              break
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($cargoVersion)) {
+            throw "Could not read [package].version from src-tauri/Cargo.toml."
+          }
+
+          $tauriConfig = Get-Content -LiteralPath "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $tauriVersion = $tauriConfig.version
+          $versions = [ordered]@{
+            "package.json" = $packageVersion
+            "src-tauri/Cargo.toml" = $cargoVersion
+            "src-tauri/tauri.conf.json" = $tauriVersion
+          }
+          foreach ($entry in $versions.GetEnumerator()) {
+            if ($entry.Value -ne $expectedVersion) {
+              throw "$($entry.Key) version '$($entry.Value)' must be '$expectedVersion'."
+            }
+          }
+
+          $bundleTargets = @($tauriConfig.bundle.targets)
+          if ($bundleTargets.Count -ne 1 -or $bundleTargets[0] -ne "nsis") {
+            throw "Tauri bundle.targets must contain only 'nsis'."
+          }
+          if ($tauriConfig.bundle.createUpdaterArtifacts -ne $true) {
+            throw "Tauri bundle.createUpdaterArtifacts must be true for signed v2 updater artifacts."
+          }
+          $updater = $tauriConfig.plugins.updater
+          if ($null -eq $updater -or [string]::IsNullOrWhiteSpace([string]$updater.pubkey)) {
+            throw "Tauri plugins.updater.pubkey must contain the public updater key."
+          }
+          if (@($updater.endpoints) -notcontains $expectedUpdaterEndpoint) {
+            throw "Tauri updater endpoints must include '$expectedUpdaterEndpoint'."
+          }
+
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
+          "RELEASE_VERSION=$expectedVersion" >> $env:GITHUB_ENV
+
+      - name: Extract release notes from CHANGELOG
+        id: release_notes
+        run: |
+          $ErrorActionPreference = "Stop"
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes-$env:RELEASE_VERSION.md"
+          node scripts/extract-release-notes.mjs --changelog CHANGELOG.md --version $env:RELEASE_VERSION --output $notesPath
+
+          $notes = Get-Content -LiteralPath $notesPath -Raw
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            throw "Release notes for $env:RELEASE_VERSION are empty."
+          }
+          $delimiter = "RELEASE_NOTES_$([Guid]::NewGuid().ToString('N'))"
+          "body<<$delimiter" >> $env:GITHUB_OUTPUT
+          $notes >> $env:GITHUB_OUTPUT
+          $delimiter >> $env:GITHUB_OUTPUT
+          "RELEASE_NOTES_PATH=$notesPath" >> $env:GITHUB_ENV
+
+      - name: Verify updater signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "GitHub secret TAURI_SIGNING_PRIVATE_KEY is required."
+          }
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "GitHub secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required."
+          }
+
+      - name: Install frontend dependencies
         run: npm ci
 
-      - name: Run tests
+      - name: Run Node tests
         run: npm test
 
-      - name: Build and verify Windows installer
-        run: npm run package:win
+      - name: Build production frontend
+        run: npm run build
 
-      - name: Publish GitHub Release
-        shell: pwsh
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Run native SSH and SFTP protocol smoke
+        run: node scripts/qa-rust-ssh.mjs
+
+      - name: Build signed Tauri release draft
+        id: tauri_release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Remote Terminal ${{ env.RELEASE_TAG }}
+          releaseBody: ${{ steps.release_notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: false
+          tauriScript: npm run tauri
+          args: --target x86_64-pc-windows-msvc --bundles nsis --ci
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+
+      - name: Validate release assets and create checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = node -p "require('./package.json').version"
-          $setup = "release/publish/RemoteTerminal-Setup-$version-x64.exe"
-          $assets = @(
-            $setup,
-            "$setup.blockmap",
-            "release/publish/latest.yml",
-            "release/publish/SHA256SUMS.txt"
-          )
-          gh release create $env:RELEASE_TAG @assets --verify-tag --title "Remote Terminal $env:RELEASE_TAG" --generate-notes --latest
+          $ErrorActionPreference = "Stop"
+          $release = gh release view $env:RELEASE_TAG --json assets,isDraft,tagName | ConvertFrom-Json
+          if ($release.tagName -ne $env:RELEASE_TAG -or $release.isDraft -ne $true) {
+            throw "Expected a draft release for '$env:RELEASE_TAG'."
+          }
+
+          $assets = @($release.assets)
+          $installers = @($assets | Where-Object { $_.name -match '(?i)\.exe$' })
+          $signatures = @($assets | Where-Object { $_.name -match '(?i)\.exe\.sig$' })
+          $updaterMetadata = @($assets | Where-Object { $_.name -ceq "latest.json" })
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS .exe asset, found $($installers.Count)."
+          }
+          if ($signatures.Count -ne 1) {
+            throw "Expected exactly one NSIS .exe.sig asset, found $($signatures.Count)."
+          }
+          if ($updaterMetadata.Count -ne 1) {
+            throw "Expected exactly one latest.json asset, found $($updaterMetadata.Count)."
+          }
+
+          $installerName = $installers[0].name
+          $signatureName = $signatures[0].name
+          if ($signatureName -cne "$installerName.sig") {
+            throw "Signature '$signatureName' does not belong to installer '$installerName'."
+          }
+          if ($installerName -notmatch [regex]::Escape($env:RELEASE_VERSION) -or $installerName -notmatch '(?i)(x64|x86_64)') {
+            throw "Installer '$installerName' does not identify version $env:RELEASE_VERSION and x64 architecture."
+          }
+
+          $downloadDirectory = Join-Path $env:RUNNER_TEMP "remote-terminal-release-$env:RELEASE_VERSION"
+          [void](New-Item -ItemType Directory -Path $downloadDirectory)
+          foreach ($assetName in @($installerName, $signatureName, "latest.json")) {
+            gh release download $env:RELEASE_TAG --dir $downloadDirectory --pattern $assetName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to download release asset '$assetName'."
+            }
+            $assetPath = Join-Path $downloadDirectory $assetName
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+              throw "Downloaded asset '$assetName' was not found."
+            }
+            if ((Get-Item -LiteralPath $assetPath).Length -eq 0) {
+              throw "Downloaded asset '$assetName' is empty."
+            }
+          }
+
+          $signature = (Get-Content -LiteralPath (Join-Path $downloadDirectory $signatureName) -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($signature)) {
+            throw "Updater signature '$signatureName' is empty."
+          }
+
+          $tauriConfig = Get-Content -LiteralPath "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          try {
+            $publicKeyText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$tauriConfig.plugins.updater.pubkey))
+            $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
+          } catch {
+            throw "Updater public key or signature is not valid base64."
+          }
+          $publicKeyPath = Join-Path $downloadDirectory "updater-public-key.pub"
+          $decodedSignaturePath = Join-Path $downloadDirectory "$installerName.minisig"
+          [IO.File]::WriteAllText($publicKeyPath, $publicKeyText, [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText($decodedSignaturePath, $signatureText, [Text.UTF8Encoding]::new($false))
+
+          $env:REMOTE_TERMINAL_UPDATE_INSTALLER = Join-Path $downloadDirectory $installerName
+          $env:REMOTE_TERMINAL_UPDATE_SIGNATURE = $decodedSignaturePath
+          $env:REMOTE_TERMINAL_UPDATE_PUBLIC_KEY = $publicKeyPath
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test update_signature_verifier verify_external_update_signature -- --ignored --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Updater installer signature does not match the configured public key."
+          }
+
+          $latest = Get-Content -LiteralPath (Join-Path $downloadDirectory "latest.json") -Raw | ConvertFrom-Json
+          if ([string]$latest.version -ne $env:RELEASE_VERSION) {
+            throw "latest.json version '$($latest.version)' does not match $env:RELEASE_VERSION."
+          }
+          $expectedNotes = (Get-Content -LiteralPath $env:RELEASE_NOTES_PATH -Raw).Trim()
+          $latestNotes = [string]$latest.notes
+          if ([string]::IsNullOrWhiteSpace($latestNotes) -or $latestNotes.Trim() -cne $expectedNotes) {
+            throw "latest.json notes do not match the CHANGELOG release body."
+          }
+
+          if ($null -eq $latest.platforms) {
+            throw "latest.json has no platforms object."
+          }
+          $platforms = @($latest.platforms.PSObject.Properties)
+          $allowedPlatformKeys = @("windows-x86_64", "windows-x86_64-nsis")
+          if ($platforms.Count -eq 0) {
+            throw "latest.json contains no updater platforms."
+          }
+          foreach ($platform in $platforms) {
+            if ($allowedPlatformKeys -notcontains $platform.Name) {
+              throw "Unexpected updater platform '$($platform.Name)' in Windows x64 release."
+            }
+            if ([string]$platform.Value.signature -cne $signature) {
+              throw "Updater signature mismatch for '$($platform.Name)'."
+            }
+            $downloadUri = [Uri]$platform.Value.url
+            $updaterInstallerName = [Uri]::UnescapeDataString([IO.Path]::GetFileName($downloadUri.AbsolutePath))
+            if ($updaterInstallerName -cne $installerName) {
+              throw "Updater URL for '$($platform.Name)' points to '$updaterInstallerName', not '$installerName'."
+            }
+            $expectedPathPrefix = "/liang-0521/remote-terminal/releases/download/$env:RELEASE_TAG/"
+            if ($downloadUri.Scheme -cne "https" -or $downloadUri.Host -cne "github.com" -or -not $downloadUri.AbsolutePath.StartsWith($expectedPathPrefix, [StringComparison]::Ordinal)) {
+              throw "Updater URL for '$($platform.Name)' is not the public tagged GitHub Release URL."
+            }
+          }
+
+          $checksumNames = @($installerName, $signatureName, "latest.json")
+          $checksumLines = foreach ($assetName in $checksumNames) {
+            $assetPath = Join-Path $downloadDirectory $assetName
+            $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $assetName"
+          }
+          $checksumPath = Join-Path $downloadDirectory "SHA256SUMS.txt"
+          $checksumContent = [string]::Join("`n", $checksumLines) + "`n"
+          [IO.File]::WriteAllText($checksumPath, $checksumContent, [Text.UTF8Encoding]::new($false))
+          gh release upload $env:RELEASE_TAG $checksumPath --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload SHA256SUMS.txt."
+          }
+
+          $publishedAssets = @((gh release view $env:RELEASE_TAG --json assets | ConvertFrom-Json).assets)
+          $checksums = @($publishedAssets | Where-Object { $_.name -ceq "SHA256SUMS.txt" })
+          if ($checksums.Count -ne 1) {
+            throw "Expected exactly one SHA256SUMS.txt asset after upload."
+          }
+
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release edit $env:RELEASE_TAG --draft=false --prerelease=false --latest --verify-tag --title "Remote Terminal $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish release '$env:RELEASE_TAG'."
+          }
+          $release = gh release view $env:RELEASE_TAG --json isDraft,isPrerelease,tagName | ConvertFrom-Json
+          if ($release.tagName -ne $env:RELEASE_TAG -or $release.isDraft -or $release.isPrerelease) {
+            throw "Release '$env:RELEASE_TAG' was not published as a stable release."
+          }

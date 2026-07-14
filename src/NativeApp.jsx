@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HardDrives, Plus } from "@phosphor-icons/react";
 import { ActivityRail } from "./components/ActivityRail.jsx";
 import { BottomPanel } from "./components/BottomPanel.jsx";
+import { CloseRequestDialog } from "./components/CloseRequestDialog.jsx";
 import { ConnectionDialog } from "./components/ConnectionDialog.jsx";
 import { ExplorerPanel } from "./components/ExplorerPanel.jsx";
 import { HostKeyDialog } from "./components/HostKeyDialog.jsx";
-import { NativeTerminalPane } from "./components/NativeTerminalPane.jsx";
 import { PasswordDialog } from "./components/PasswordDialog.jsx";
 import { SettingsDialog } from "./components/SettingsDialog.jsx";
 import { StatusBar } from "./components/StatusBar.jsx";
@@ -14,6 +14,9 @@ import { getNativeClient } from "./native/client.js";
 import "./native-styles.css";
 import "./update-styles.css";
 import "./credential-styles.css";
+
+const NativeTerminalPane = lazy(() => import("./components/NativeTerminalPane.jsx")
+  .then(({ NativeTerminalPane: component }) => ({ default: component })));
 
 const DEFAULT_BOTTOM_PANEL_HEIGHT = 168;
 const DEFAULT_MONITOR_PANEL_HEIGHT = 344;
@@ -38,6 +41,9 @@ function createWorkspace(connectionId) {
     filesLoading: false,
     filesError: "",
     sftpError: "",
+    completionCatalog: [],
+    completionLoading: false,
+    completionError: "",
     metrics: null,
     monitorLoading: false,
     monitorError: "",
@@ -92,6 +98,11 @@ export function NativeApp() {
   const [passwordConnectionId, setPasswordConnectionId] = useState(null);
   const [hostKeyPrompt, setHostKeyPrompt] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [closeBehavior, setCloseBehavior] = useState(null);
+  const [closeBehaviorError, setCloseBehaviorError] = useState("");
+  const [closeRequestOpen, setCloseRequestOpen] = useState(false);
+  const [closeRequestId, setCloseRequestId] = useState(null);
+  const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
   const [updateState, setUpdateState] = useState(null);
   const [updateActionError, setUpdateActionError] = useState("");
@@ -107,6 +118,7 @@ export function NativeApp() {
   const pendingSecretsRef = useRef(new Map());
   const attemptsRef = useRef(new Map());
   const directoryRequestsRef = useRef(new Map());
+  const completionRequestsRef = useRef(new Map());
   const monitorInFlightRef = useRef(new Set());
   activeConnectionIdRef.current = activeConnectionId;
 
@@ -158,6 +170,38 @@ export function NativeApp() {
     } finally {
       if (directoryRequestsRef.current.get(connectionId)?.requestId === requestId) {
         directoryRequestsRef.current.delete(connectionId);
+      }
+    }
+  }, [addIssue, client, updateWorkspace]);
+
+  const loadCompletionCatalog = useCallback(async (connectionId, sessionIdOverride) => {
+    const sessionId = sessionIdOverride || workspacesRef.current[connectionId]?.sessionId;
+    if (!sessionId) return;
+    const requestId = crypto.randomUUID();
+    completionRequestsRef.current.set(connectionId, { requestId, sessionId });
+    const isCurrentRequest = () => {
+      const request = completionRequestsRef.current.get(connectionId);
+      return request?.requestId === requestId
+        && request.sessionId === sessionId
+        && workspacesRef.current[connectionId]?.sessionId === sessionId;
+    };
+    updateWorkspace(connectionId, { completionLoading: true, completionError: "" });
+    try {
+      const completionCatalog = await client.terminal.completions(sessionId);
+      if (!isCurrentRequest()) return;
+      updateWorkspace(connectionId, {
+        completionCatalog,
+        completionLoading: false,
+        completionError: "",
+      });
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      const message = error?.message || "无法加载服务器智能补全目录。";
+      updateWorkspace(connectionId, { completionLoading: false, completionError: message });
+      addIssue(connectionId, "智能补全加载失败", message, error?.code || "COMPLETION_CATALOG_FAILED");
+    } finally {
+      if (completionRequestsRef.current.get(connectionId)?.requestId === requestId) {
+        completionRequestsRef.current.delete(connectionId);
       }
     }
   }, [addIssue, client, updateWorkspace]);
@@ -241,6 +285,41 @@ export function NativeApp() {
       .catch((error) => {
         if (!disposed) setUpdateActionError(error.message);
       });
+    const initialCheckTimer = window.setTimeout(() => {
+      void client.updates.check().catch(() => undefined);
+    }, 10_000);
+    const checkInterval = window.setInterval(() => {
+      void client.updates.check().catch(() => undefined);
+    }, 6 * 60 * 60 * 1000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(initialCheckTimer);
+      window.clearInterval(checkInterval);
+      unsubscribe();
+    };
+  }, [client]);
+
+  useEffect(() => {
+    if (!client.app || !client.events.onCloseRequested) return undefined;
+    let disposed = false;
+    void client.app.getCloseBehavior()
+      .then((behavior) => {
+        if (!disposed) setCloseBehavior(behavior);
+      })
+      .catch((error) => {
+        if (!disposed) setCloseBehaviorError(error.message);
+    });
+    const unsubscribe = client.events.onCloseRequested((event) => {
+      if (disposed) return;
+      if (typeof event?.requestId !== "string" || !event.requestId) return;
+      const activeTransferCount = Number.isSafeInteger(event?.activeTransferCount)
+        && event.activeTransferCount > 0
+        ? event.activeTransferCount
+        : 0;
+      setCloseRequestId(event.requestId);
+      setCloseRequestActiveTransferCount(activeTransferCount);
+      setCloseRequestOpen(true);
+    });
     return () => {
       disposed = true;
       unsubscribe();
@@ -314,12 +393,17 @@ export function NativeApp() {
         sessionId: workspace.sessionId,
         state: workspace.state,
         error: workspace.error,
+        completionCatalog: workspace.completionCatalog,
+        completionLoading: workspace.completionLoading,
+        completionError: workspace.completionError,
+        directoryEntries: workspace.entries,
       } : null;
     })
     .filter(Boolean);
   const passwordServer = servers.find((server) => server.id === passwordConnectionId) || null;
   const hasActiveTransfers = Object.values(workspaces).some((workspace) => workspace.transfers
     .some((transfer) => ACTIVE_TRANSFER_STATES.has(transfer.state)));
+  const closeDialogHasActiveTransfers = hasActiveTransfers || closeRequestActiveTransferCount > 0;
 
   async function checkForUpdates() {
     setUpdateActionError("");
@@ -337,6 +421,27 @@ export function NativeApp() {
     } catch (error) {
       setUpdateActionError(error.message);
     }
+  }
+
+  async function changeCloseBehavior(behavior, { rethrow = false } = {}) {
+    if (!client.app) return;
+    setCloseBehaviorError("");
+    try {
+      setCloseBehavior(await client.app.setCloseBehavior(behavior));
+    } catch (error) {
+      setCloseBehaviorError(error.message);
+      if (rethrow) throw error;
+    }
+  }
+
+  async function resolveCloseRequest(action, { remember = false } = {}) {
+    if (!client.app) return;
+    if (!closeRequestId) throw new Error("关闭请求已失效，请重新关闭主窗口。");
+    if (remember) await changeCloseBehavior(action, { rethrow: true });
+    await client.app.resolveCloseRequest(closeRequestId, action);
+    setCloseRequestOpen(false);
+    setCloseRequestId(null);
+    setCloseRequestActiveTransferCount(0);
   }
 
   function openConnections(view = "list") {
@@ -388,6 +493,7 @@ export function NativeApp() {
         sftpError: result.sftpError?.message || "",
         filesError: result.sftpError?.message || "",
       });
+      void loadCompletionCatalog(connectionId, result.sessionId);
       if (result.home) void loadDirectory(connectionId, result.home, result.sessionId);
       if (result.sftpError?.message) addIssue(connectionId, "SFTP 不可用", result.sftpError.message, result.sftpError.code);
       if (result.credentialPersistence?.state === "failed") {
@@ -424,7 +530,13 @@ export function NativeApp() {
       : { source: "saved" };
     pendingSecretsRef.current.set(connectionId, credential);
     openWorkspaceTab(connectionId);
-    updateWorkspace(connectionId, { state: "connecting", error: "" });
+    updateWorkspace(connectionId, {
+      state: "connecting",
+      error: "",
+      completionCatalog: [],
+      completionLoading: false,
+      completionError: "",
+    });
     try {
       const probe = await client.hostKeys.probe(connectionId);
       if (attemptsRef.current.get(connectionId) !== attemptId) return;
@@ -480,6 +592,7 @@ export function NativeApp() {
     attemptsRef.current.delete(connectionId);
     pendingSecretsRef.current.delete(connectionId);
     directoryRequestsRef.current.delete(connectionId);
+    completionRequestsRef.current.delete(connectionId);
     if (workspace?.sessionId) await client.ssh.disconnect(workspace.sessionId);
     await client.connections.remove(connectionId);
 
@@ -525,6 +638,7 @@ export function NativeApp() {
     attemptsRef.current.delete(connectionId);
     pendingSecretsRef.current.delete(connectionId);
     directoryRequestsRef.current.delete(connectionId);
+    completionRequestsRef.current.delete(connectionId);
     const workspace = workspacesRef.current[connectionId];
     if (workspace?.transfers.some((transfer) => ACTIVE_TRANSFER_STATES.has(transfer.state))) {
       addIssue(connectionId, "工作区仍有活动传输", "请等待上传完成或取消传输后再关闭工作区。", "ACTIVE_TRANSFER");
@@ -576,6 +690,20 @@ export function NativeApp() {
     }
   }
 
+  async function selectUploadFiles() {
+    const connectionId = activeConnectionIdRef.current;
+    if (!client.dialog?.openFiles) {
+      if (connectionId) addIssue(connectionId, "无法选择上传文件", "当前原生运行时未提供系统文件选择器。", "FILE_DIALOG_UNAVAILABLE");
+      return;
+    }
+    try {
+      const files = await client.dialog.openFiles({ title: "选择要上传到当前远程目录的文件" });
+      if (files.length) await uploadFiles(files);
+    } catch (error) {
+      if (connectionId) addIssue(connectionId, "无法选择上传文件", error.message, error.code);
+    }
+  }
+
   function openBottomTab(tab) {
     setActiveBottomTab(tab);
     setBottomVisible(true);
@@ -617,7 +745,6 @@ export function NativeApp() {
     <div className="app-root" style={{ "--accent": appearance.accent }}>
       <main className={`app-shell ${railVisible ? "" : "is-rail-hidden"}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>
         <TopBar
-          runtimeMode="native"
           server={activeServer}
           servers={servers}
           metrics={activeWorkspace?.metrics || null}
@@ -637,7 +764,6 @@ export function NativeApp() {
         <div className="workbench">
           <ExplorerPanel
             mode={activeServer ? activeRail : "connections"}
-            runtimeMode="native"
             server={activeServer}
             servers={servers}
             activeServerId={activeConnectionId}
@@ -648,6 +774,8 @@ export function NativeApp() {
               error: activeWorkspace.filesError,
             } : null}
             onUpload={uploadFiles}
+            onSelectUploadFiles={selectUploadFiles}
+            onNativeDragDropSubscribe={client.events.onDragDrop}
             onRefresh={() => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory)}
             onNavigate={(path) => void loadDirectory(activeConnectionId, path)}
             onOpenBottomTab={openBottomTab}
@@ -656,16 +784,18 @@ export function NativeApp() {
             onOpenConnections={openConnections}
           />
           {sessions.length ? (
-            <NativeTerminalPane
-              client={client}
-              sessions={sessions}
-              activeSessionId={activeConnectionId}
-              appearance={appearance}
-              onSessionSelect={setActiveConnectionId}
-              onSessionAdd={() => openConnections("new")}
-              onSessionClose={closeWorkspace}
-              onTerminalError={onTerminalError}
-            />
+            <Suspense fallback={<section className="terminal-pane native-empty-workspace" role="status">正在加载终端组件…</section>}>
+              <NativeTerminalPane
+                client={client}
+                sessions={sessions}
+                activeSessionId={activeConnectionId}
+                appearance={appearance}
+                onSessionSelect={setActiveConnectionId}
+                onSessionAdd={() => openConnections("new")}
+                onSessionClose={closeWorkspace}
+                onTerminalError={onTerminalError}
+              />
+            </Suspense>
           ) : (
             <section className="terminal-pane native-empty-workspace">
               <HardDrives size={46} weight="duotone" />
@@ -675,7 +805,6 @@ export function NativeApp() {
             </section>
           )}
           {bottomVisible && activeServer && <BottomPanel
-            runtimeMode="native"
             activeTab={activeBottomTab}
             collapsed={bottomCollapsed}
             transfers={activeWorkspace?.transfers || []}
@@ -697,12 +826,11 @@ export function NativeApp() {
             onCancel={(transferId) => void client.sftp.cancel(transferId).catch((error) => addIssue(activeConnectionId, "取消传输失败", error.message, error.code))}
             onRetry={(transferId) => void client.sftp.retry(transferId).catch((error) => addIssue(activeConnectionId, "重试传输失败", error.message, error.code))}
           />}
-          <StatusBar runtimeMode="native" server={activeServer} error={activeWorkspace?.error} />
+          <StatusBar server={activeServer} error={activeWorkspace?.error} />
         </div>
       </main>
 
       <ConnectionDialog
-        runtimeMode="native"
         open={connectionDialog.open}
         initialView={connectionDialog.view}
         servers={servers}
@@ -722,12 +850,20 @@ export function NativeApp() {
         onSubmit={submitSavedPassword}
       />
       <HostKeyDialog prompt={hostKeyPrompt} onAccept={acceptHostKey} onClose={closeHostKeyPrompt} />
+      <CloseRequestDialog
+        open={closeRequestOpen}
+        hasActiveTransfers={closeDialogHasActiveTransfers}
+        onResolve={resolveCloseRequest}
+      />
       <SettingsDialog
         open={settingsOpen}
         theme={appearance}
         onThemeChange={(patch) => setAppearance((current) => ({ ...current, ...patch }))}
         onWallpaperChange={({ name, url }) => setAppearance((current) => ({ ...current, wallpaperName: name, wallpaperUrl: url }))}
         onRemoveWallpaper={() => setAppearance((current) => ({ ...current, wallpaperName: "", wallpaperUrl: "" }))}
+        closeBehavior={closeBehavior}
+        closeBehaviorError={closeBehaviorError}
+        onCloseBehaviorChange={changeCloseBehavior}
         updateState={updateState}
         updateActionError={updateActionError}
         hasActiveTransfers={hasActiveTransfers}

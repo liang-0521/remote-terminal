@@ -1,11 +1,19 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App.jsx";
+import { AppErrorBoundary } from "./components/AppErrorBoundary.js";
 import "./styles.css";
 
-const application = <App />;
-const runningInElectron = navigator.userAgent.includes("Electron");
+const RuntimeApp = lazy(() => import("./App.jsx")
+  .then(({ App }) => ({ default: App })));
+
+const application = (
+  <AppErrorBoundary>
+    <Suspense fallback={<main className="native-startup-state" role="status">正在加载客户端…</main>}>
+      <RuntimeApp />
+    </Suspense>
+  </AppErrorBoundary>
+);
 
 createRoot(document.getElementById("root")).render(
-  runningInElectron ? application : <React.StrictMode>{application}</React.StrictMode>,
+  <React.StrictMode>{application}</React.StrictMode>,
 );
