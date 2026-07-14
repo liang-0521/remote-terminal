@@ -13,7 +13,8 @@
     "prebuild": "node scripts/build-preload.mjs",
     "build": "vite build",
     "desktop": "npm run build && electron .",
-    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never && node scripts/package-win.mjs",
+    "ensure:electron": "install-electron --no",
+    "package:win": "npm run build && npm run ensure:electron && electron-builder --win nsis --x64 --publish never && node scripts/package-win.mjs",
     "preview": "vite preview",
     "test": "node --test --test-isolation=none"
   },

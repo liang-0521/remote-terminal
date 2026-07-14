@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing version tag to publish"
+        required: true
+        default: "v0.1.0"
+        type: string
 
 permissions:
   contents: write
@@ -13,21 +20,31 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
 
-      - name: Verify release tag
+      - name: Verify release target
         shell: pwsh
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
           $version = node -p "require('./package.json').version"
-          if ($env:GITHUB_REF_NAME -ne "v$version") {
-            throw "Tag $env:GITHUB_REF_NAME does not match package version v$version"
+          $releaseTag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $env:DISPATCH_TAG
+          } else {
+            $env:GITHUB_REF_NAME
           }
+          if ($releaseTag -ne "v$version") {
+            throw "Tag $releaseTag does not match package version v$version"
+          }
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
 
       - name: Install dependencies
         run: npm ci
@@ -51,4 +68,4 @@ jobs:
             "release/publish/latest.yml",
             "release/publish/SHA256SUMS.txt"
           )
-          gh release create $env:GITHUB_REF_NAME @assets --verify-tag --title "Remote Terminal $env:GITHUB_REF_NAME" --generate-notes --latest
+          gh release create $env:RELEASE_TAG @assets --verify-tag --title "Remote Terminal $env:RELEASE_TAG" --generate-notes --latest
