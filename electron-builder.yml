@@ -1,0 +1,43 @@
+appId: com.liang.remote-terminal
+productName: Remote Terminal
+artifactName: RemoteTerminal-Setup-${version}-${arch}.${ext}
+asar: true
+compression: maximum
+electronUpdaterCompatibility: ">= 2.16"
+electronDist: node_modules/electron/dist
+
+directories:
+  output: release/publish
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+  - THIRD_PARTY_NOTICES.md
+  - "!electron/preload-source.cjs"
+
+win:
+  executableName: RemoteTerminal
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: true
+  perMachine: false
+  differentialPackage: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Remote Terminal
+  uninstallDisplayName: Remote Terminal
+  runAfterFinish: true
+
+publish:
+  - provider: github
+    owner: liang-0521
+    repo: remote-terminal
+    channel: latest
+    releaseType: release

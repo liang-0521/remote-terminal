@@ -1,0 +1,44 @@
+# Dependencies and local package caches
+node_modules/
+.npm-cache/
+.pnpm-store/
+
+# Generated application and installer artifacts
+dist/
+release/
+out/
+artifacts/
+
+# Local product-design and visual-QA material
+/docs/
+/design-qa.md
+/scripts/compose-design-qa.py
+
+# Test and coverage output
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+__pycache__/
+*.py[cod]
+
+# Local update feeds and signing credentials
+dev-app-update.yml
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.pem
+*.key
+*.jks
+
+# Logs, editor state, and operating-system files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,54 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Verify release tag
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version v$version"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build and verify Windows installer
+        run: npm run package:win
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $setup = "release/publish/RemoteTerminal-Setup-$version-x64.exe"
+          $assets = @(
+            $setup,
+            "$setup.blockmap",
+            "release/publish/latest.yml",
+            "release/publish/SHA256SUMS.txt"
+          )
+          gh release create $env:GITHUB_REF_NAME @assets --verify-tag --title "Remote Terminal $env:GITHUB_REF_NAME" --generate-notes --latest

@@ -1,0 +1,102 @@
+.settings-update {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 16px;
+  border: 1px solid rgba(133, 159, 190, 0.2);
+  border-radius: 10px;
+  background: rgba(7, 21, 37, 0.5);
+}
+
+.settings-update__details {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.settings-update__version {
+  color: #a8b8ca;
+  font-size: 13px;
+}
+
+.settings-update__version strong {
+  margin-left: 4px;
+  color: #eaf1f9;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.settings-update__status {
+  color: #d4deea;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-update__status.is-error {
+  color: #f6a5a5;
+}
+
+.settings-update__status.is-ready {
+  color: #7ee2ae;
+}
+
+.settings-update__details small {
+  color: #71869e;
+  font-size: 11px;
+}
+
+.settings-update__action {
+  flex: 0 0 auto;
+  min-width: 126px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 17%, rgba(9, 25, 43, 0.9));
+  color: #eeeaff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-update__action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 27%, rgba(9, 25, 43, 0.9));
+}
+
+.settings-update__action:disabled {
+  border-color: rgba(133, 159, 190, 0.14);
+  color: #718197;
+  background: rgba(15, 33, 51, 0.6);
+  cursor: not-allowed;
+}
+
+.settings-update__progress {
+  height: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(120, 145, 174, 0.18);
+}
+
+.settings-update__progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+@media (max-width: 720px) {
+  .settings-update {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-update__action {
+    width: 100%;
+  }
+}
