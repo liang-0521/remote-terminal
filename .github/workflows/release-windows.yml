@@ -6,8 +6,13 @@ on:
       release_tag:
         description: "Existing version tag to publish"
         required: true
-        default: "v0.3.0"
+        default: "v0.3.1"
         type: string
+      allow_unsigned:
+        description: "Explicit one-time exception for the unsigned v0.3.1 Windows installer"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -48,9 +53,10 @@ jobs:
       - name: Verify release target and updater configuration
         env:
           DISPATCH_TAG: ${{ inputs.release_tag }}
+          ALLOW_UNSIGNED_RELEASE: ${{ inputs.allow_unsigned }}
         run: |
           $ErrorActionPreference = "Stop"
-          $expectedVersion = "0.3.0"
+          $expectedVersion = "0.3.1"
           $expectedTag = "v$expectedVersion"
           $expectedUpdaterEndpoint = "https://github.com/liang-0521/remote-terminal/releases/latest/download/latest.json"
 
@@ -61,6 +67,10 @@ jobs:
           }
           if ($releaseTag -ne $expectedTag) {
             throw "Release tag '$releaseTag' must be '$expectedTag'."
+          }
+          $allowUnsigned = $env:ALLOW_UNSIGNED_RELEASE -ceq "true"
+          if ($allowUnsigned -and $expectedVersion -cne "0.3.1") {
+            throw "The unsigned release exception is limited to version 0.3.1."
           }
 
           $tagCommit = (git rev-list -n 1 $releaseTag).Trim()
@@ -114,6 +124,19 @@ jobs:
           if ($tauriConfig.bundle.createUpdaterArtifacts -ne $true) {
             throw "Tauri bundle.createUpdaterArtifacts must be true for signed v2 updater artifacts."
           }
+          $windows = $tauriConfig.bundle.windows
+          if ([string]$windows.digestAlgorithm -cne "sha256") {
+            throw "Tauri bundle.windows.digestAlgorithm must be sha256."
+          }
+          $signCommand = $windows.signCommand
+          if ($null -eq $signCommand -or [string]$signCommand.cmd -cne "powershell") {
+            throw "Tauri bundle.windows.signCommand must use the repository Authenticode signer."
+          }
+          $signArguments = @($signCommand.args)
+          if (@($signArguments | Where-Object { $_ -ceq "../scripts/windows-authenticode.ps1" }).Count -ne 1 -or
+              @($signArguments | Where-Object { $_ -ceq "%1" }).Count -ne 1) {
+            throw "Tauri Authenticode signCommand must call the repository signer with exactly one binary placeholder."
+          }
           $updater = $tauriConfig.plugins.updater
           if ($null -eq $updater -or [string]::IsNullOrWhiteSpace([string]$updater.pubkey)) {
             throw "Tauri plugins.updater.pubkey must contain the public updater key."
@@ -155,6 +178,13 @@ jobs:
             throw "GitHub secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required."
           }
 
+      - name: Verify Authenticode signing identity
+        if: ${{ inputs.allow_unsigned != true }}
+        env:
+          REMOTE_TERMINAL_AUTHENTICODE_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CODESIGN_CERTIFICATE_THUMBPRINT }}
+          REMOTE_TERMINAL_AUTHENTICODE_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-authenticode.ps1 -Mode Preflight
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -171,12 +201,15 @@ jobs:
         run: node scripts/qa-rust-ssh.mjs
 
       - name: Build signed Tauri release draft
+        if: ${{ inputs.allow_unsigned != true }}
         id: tauri_release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          REMOTE_TERMINAL_AUTHENTICODE_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CODESIGN_CERTIFICATE_THUMBPRINT }}
+          REMOTE_TERMINAL_AUTHENTICODE_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Remote Terminal ${{ env.RELEASE_TAG }}
@@ -190,9 +223,31 @@ jobs:
           updaterJsonPreferNsis: true
           uploadUpdaterSignatures: true
 
+      - name: Build explicitly unsigned Tauri release draft
+        if: ${{ inputs.allow_unsigned == true }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Remote Terminal ${{ env.RELEASE_TAG }}
+          releaseBody: ${{ steps.release_notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: false
+          tauriScript: npm run tauri
+          args: --target x86_64-pc-windows-msvc --bundles nsis --ci --config src-tauri/tauri.unsigned-0.3.1.conf.json
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+
       - name: Validate release assets and create checksums
         env:
           GH_TOKEN: ${{ github.token }}
+          REMOTE_TERMINAL_AUTHENTICODE_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CODESIGN_CERTIFICATE_THUMBPRINT }}
+          ALLOW_UNSIGNED_RELEASE: ${{ inputs.allow_unsigned }}
         run: |
           $ErrorActionPreference = "Stop"
           $release = gh release view $env:RELEASE_TAG --json assets,isDraft,tagName | ConvertFrom-Json
@@ -236,6 +291,19 @@ jobs:
             }
             if ((Get-Item -LiteralPath $assetPath).Length -eq 0) {
               throw "Downloaded asset '$assetName' is empty."
+            }
+          }
+
+          $installerPath = Join-Path $downloadDirectory $installerName
+          if ($env:ALLOW_UNSIGNED_RELEASE -ceq "true") {
+            $authenticode = Get-AuthenticodeSignature -LiteralPath $installerPath
+            if ($authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+              throw "The v0.3.1 unsigned exception expected an installer without Authenticode."
+            }
+          } else {
+            powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-authenticode.ps1 -Mode Verify -Path $installerPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installer Authenticode signature or timestamp verification failed."
             }
           }
 
