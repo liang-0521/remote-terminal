@@ -1,6 +1,6 @@
 # Third-party notices
 
-Remote Terminal 0.3.1 includes the open-source components listed below. Versions and license identifiers are taken from the installed npm package metadata and Cargo registry manifests used by this release. “Copyright / attribution” reproduces the wording found in bundled license files where available; an author-only entry is identified as metadata and does not assert copyright ownership.
+Remote Terminal 0.4.0 includes the open-source components listed below. Versions and license identifiers are taken from the installed npm package metadata and Cargo registry manifests used by this release. “Copyright / attribution” reproduces the wording found in bundled license files where available; an author-only entry is identified as metadata and does not assert copyright ownership.
 
 The runtime tables cover the project's core direct production dependencies; the separate build-time table records direct release tooling. Transitive dependencies remain subject to their own licenses.
 
@@ -22,6 +22,7 @@ The runtime tables cover the project's core direct production dependencies; the 
 | atomic-write-file | `atomic-write-file` 0.3.0 | Andrea Corbellini (Cargo author metadata; the packaged license does not state a copyright year) | BSD-3-Clause | [andreacorbellini/rust-atomic-write-file](https://github.com/andreacorbellini/rust-atomic-write-file) |
 | Bytes | `bytes` 1.12.1 | Copyright (c) 2018 Carl Lerche | MIT | [tokio-rs/bytes](https://github.com/tokio-rs/bytes) |
 | Chrono | `chrono` 0.4.45 | Copyright (c) 2014-2026 Kang Seonghoon and contributors | MIT OR Apache-2.0 | [chronotope/chrono](https://github.com/chronotope/chrono) |
+| drag-rs | `drag` 2.1.1 | Copyright (c) 2023 - Present CrabNebula Ltd. | Apache-2.0 OR MIT | [crabnebula-dev/drag-rs](https://github.com/crabnebula-dev/drag-rs) |
 | Keyring | `keyring-core` 1.0.0; `windows-native-keyring-store` 1.1.0 | Copyright (c) 2016 keyring Developers | MIT OR Apache-2.0 | [keyring-core](https://github.com/open-source-cooperative/keyring-core), [Windows native store](https://github.com/open-source-cooperative/windows-native-keyring-store) |
 | Russh | `russh` 0.62.2 | Pierre-Étienne Meunier (Cargo author metadata) | Apache-2.0 | [warp-tech/russh](https://github.com/warp-tech/russh) |
 | Russh SFTP | `russh-sftp` 2.3.0 | The packaged license does not state specific copyright attribution | Apache-2.0 | [AspectUnk/russh-sftp](https://github.com/AspectUnk/russh-sftp) |

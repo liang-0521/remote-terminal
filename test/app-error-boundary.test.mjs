@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   AppErrorBoundary,
   renderErrorMessage,
-} from "../src/components/AppErrorBoundary.js";
+} from "../src/components/shared/AppErrorBoundary.js";
 
 test("错误边界保留原始渲染错误，并规范化可见信息", () => {
   const error = new Error("监控数据无法渲染");

@@ -4,13 +4,16 @@ use crate::{
         MonitorSample, SshConnectPayload, SshConnectResponse,
     },
     credentials::{CredentialRemoval, CredentialStatus},
+    data_directory::{migrate_data_directory, paths_equivalent, validate_selected_data_directory},
+    drag_out::NativeFileDragResult,
     error::{AppError, AppResult},
     lifecycle,
     ssh::{
-        CompletionItem, DirectoryListing, DisconnectResult, TerminalAttachResult,
-        TerminalDimensions, TransferSummary, UploadFile,
+        CachedDownload, CachedDownloadRelease, CompletionItem, DirectoryListing, DisconnectResult,
+        RemoteEntryRemoval, RemoteEntryRename, TerminalAttachResult, TerminalDimensions,
+        TransferSummary, UploadFile,
     },
-    state::{AppState, CloseBehavior},
+    state::{AppState, CloseBehavior, DataDirectoryStatus},
     storage::{Connection, ConnectionDraft, ConnectionRemoval},
 };
 use serde::{Deserialize, Serialize};
@@ -75,6 +78,18 @@ pub struct UpdateInstallResult {
     pub installing: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirectoryChangeResult {
+    pub changed: bool,
+    pub migrated_files: Vec<String>,
+    pub source_retained: bool,
+    pub credentials_migrated: bool,
+    pub webview_cache_migrated: bool,
+    pub restart_required: bool,
+    pub status: DataDirectoryStatus,
+}
+
 #[tauri::command]
 pub fn show_main_window<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
     lifecycle::restore_main_window(&app)
@@ -89,6 +104,45 @@ pub fn quit_app<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
 #[tauri::command]
 pub fn get_backend_status(state: State<'_, BackendState>) -> BackendStatus {
     state.snapshot()
+}
+
+#[tauri::command]
+pub fn data_directory_status(state: State<'_, AppState>) -> AppResult<DataDirectoryStatus> {
+    state
+        .data_directory_status()
+        .map_err(|_| AppError::new("SETTINGS_READ_FAILED", "无法读取客户端数据目录设置。"))
+}
+
+#[tauri::command]
+pub async fn data_directory_change(
+    target_path: String,
+    app_state: State<'_, AppState>,
+    backend: State<'_, BackendState>,
+) -> AppResult<DataDirectoryChangeResult> {
+    let target = validate_selected_data_directory(&target_path)?;
+    backend
+        .with_data_directory_change(|| {
+            let source = app_state.active_data_directory();
+            let migration = migrate_data_directory(&source, &target)?;
+            let status = app_state.set_data_directory(&target).map_err(|_| {
+                AppError::new(
+                    "SETTINGS_WRITE_FAILED",
+                    "数据已安全复制，但无法保存下次启动的数据目录；当前目录保持不变。",
+                )
+            })?;
+            let result = DataDirectoryChangeResult {
+                changed: !paths_equivalent(&source, &target),
+                migrated_files: migration.migrated_files,
+                source_retained: true,
+                credentials_migrated: false,
+                webview_cache_migrated: false,
+                restart_required: status.restart_required,
+                status,
+            };
+            let restart_required = result.restart_required;
+            Ok((result, restart_required))
+        })
+        .await
 }
 
 #[tauri::command]
@@ -192,12 +246,68 @@ pub async fn completion_catalog(
 }
 
 #[tauri::command]
+pub fn command_history_list(
+    connection_id: String,
+    state: State<'_, BackendState>,
+) -> AppResult<Vec<String>> {
+    state.list_command_history(&connection_id)
+}
+
+#[tauri::command]
+pub fn command_history_record(
+    connection_id: String,
+    command: String,
+    state: State<'_, BackendState>,
+) -> AppResult<Vec<String>> {
+    state.record_command_history(&connection_id, &command)
+}
+
+#[tauri::command]
+pub fn command_history_remove(
+    connection_id: String,
+    command: String,
+    state: State<'_, BackendState>,
+) -> AppResult<Vec<String>> {
+    state.remove_command_history(&connection_id, &command)
+}
+
+#[tauri::command]
 pub async fn sftp_list(
     session_id: String,
     path: String,
     state: State<'_, BackendState>,
 ) -> AppResult<DirectoryListing> {
     state.list_directory(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn sftp_remove(
+    session_id: String,
+    path: String,
+    expected_entry_type: String,
+    state: State<'_, BackendState>,
+) -> AppResult<RemoteEntryRemoval> {
+    state
+        .remove_remote_entry(&session_id, &path, &expected_entry_type)
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    session_id: String,
+    source_path: String,
+    target_path: String,
+    expected_entry_type: String,
+    state: State<'_, BackendState>,
+) -> AppResult<RemoteEntryRename> {
+    state
+        .rename_remote_entry(
+            &session_id,
+            &source_path,
+            &target_path,
+            &expected_entry_type,
+        )
+        .await
 }
 
 #[tauri::command]
@@ -210,6 +320,34 @@ pub async fn sftp_upload(
     state
         .upload_files(&session_id, &remote_directory, files)
         .await
+}
+
+#[tauri::command]
+pub async fn sftp_download_to_cache(
+    session_id: String,
+    remote_path: String,
+    state: State<'_, BackendState>,
+) -> AppResult<CachedDownload> {
+    state
+        .download_file_to_cache(&session_id, &remote_path)
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_release_cached_download(
+    cache_id: String,
+    state: State<'_, BackendState>,
+) -> AppResult<CachedDownloadRelease> {
+    state.release_cached_download(&cache_id).await
+}
+
+#[tauri::command]
+pub async fn sftp_start_cached_drag(
+    cache_id: String,
+    app: AppHandle,
+    state: State<'_, BackendState>,
+) -> AppResult<NativeFileDragResult> {
+    state.start_cached_file_drag(&cache_id, app).await
 }
 
 #[tauri::command]

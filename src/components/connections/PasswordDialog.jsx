@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Eye, EyeSlash, Key, LockKey, X } from "@phosphor-icons/react";
-import { useModalFocus } from "./useModalFocus.js";
+import { useModalFocus } from "../shared/useModalFocus.js";
 
 export function PasswordDialog({ open, server, credentialStorage = { available: false }, onSubmit, onClose }) {
   const [password, setPassword] = useState("");

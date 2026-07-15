@@ -12,6 +12,8 @@ const TAURI_COMMANDS = Object.freeze({
   connectionsList: "connections_list",
   connectionsSave: "connections_save",
   connectionsRemove: "connections_remove",
+  dataDirectoryStatus: "data_directory_status",
+  dataDirectoryChange: "data_directory_change",
   credentialsStatus: "credentials_status",
   credentialsRemove: "credentials_remove",
   hostKeysProbe: "host_keys_probe",
@@ -22,8 +24,16 @@ const TAURI_COMMANDS = Object.freeze({
   terminalWrite: "terminal_write",
   terminalResize: "terminal_resize",
   completionCatalog: "completion_catalog",
+  commandHistoryList: "command_history_list",
+  commandHistoryRecord: "command_history_record",
+  commandHistoryRemove: "command_history_remove",
   sftpList: "sftp_list",
+  sftpRemove: "sftp_remove",
+  sftpRename: "sftp_rename",
   sftpUpload: "sftp_upload",
+  sftpDownloadToCache: "sftp_download_to_cache",
+  sftpReleaseCachedDownload: "sftp_release_cached_download",
+  sftpStartCachedDrag: "sftp_start_cached_drag",
   sftpCancel: "sftp_cancel",
   sftpRetry: "sftp_retry",
   monitorSample: "monitor_sample",
@@ -152,24 +162,55 @@ function normalizeLocalPath(value) {
   return { localPath };
 }
 
+function normalizeDirectoryPath(value) {
+  if (typeof value !== "string" || !WINDOWS_ABSOLUTE_PATH.test(value)) {
+    throw new NativeClientError(
+      "DIRECTORY_PATH_UNAVAILABLE",
+      "无法取得所选目录的 Windows 绝对路径。",
+    );
+  }
+  return value;
+}
+
 function prepareTauriFiles(files) {
   return Array.from(files || [], normalizeLocalPath);
 }
 
 function requireCompletionCatalog(value) {
-  const validSources = new Set(["remote-command", "history"]);
   const valid = Array.isArray(value) && value.every((item) => (
     item
     && typeof item === "object"
     && typeof item.command === "string"
     && item.command.trim()
-    && typeof item.source === "string"
-    && validSources.has(item.source)
+    && item.source === "remote-command"
   ));
   if (!valid) {
     throw new NativeClientError(
       "INVALID_COMPLETION_CATALOG",
       "服务器返回了无法识别的智能补全目录。",
+    );
+  }
+  return value;
+}
+
+function requireCommandHistory(value) {
+  const unique = new Set();
+  const valid = Array.isArray(value) && value.length <= 200 && value.every((command) => {
+    if (typeof command !== "string"
+      || command !== command.trim()
+      || command.length === 0
+      || command.length > 2_048
+      || /[\u0000-\u001f\u007f]/.test(command)
+      || unique.has(command)) {
+      return false;
+    }
+    unique.add(command);
+    return true;
+  });
+  if (!valid) {
+    throw new NativeClientError(
+      "INVALID_COMMAND_HISTORY",
+      "本机返回了无法识别的命令历史。",
     );
   }
   return value;
@@ -369,6 +410,10 @@ function createTauriClient(api) {
       save: (connection) => call(TAURI_COMMANDS.connectionsSave, { connection }),
       remove: (connectionId) => call(TAURI_COMMANDS.connectionsRemove, { connectionId }),
     }),
+    storage: Object.freeze({
+      dataDirectoryStatus: () => call(TAURI_COMMANDS.dataDirectoryStatus),
+      changeDataDirectory: (targetPath) => call(TAURI_COMMANDS.dataDirectoryChange, { targetPath }),
+    }),
     credentials: Object.freeze({
       status: () => call(TAURI_COMMANDS.credentialsStatus),
       remove: (connectionId) => call(TAURI_COMMANDS.credentialsRemove, { connectionId }),
@@ -391,6 +436,18 @@ function createTauriClient(api) {
       resize: (sessionId, dimensions) => call(TAURI_COMMANDS.terminalResize, { sessionId, dimensions }),
       completions: (sessionId) => call(TAURI_COMMANDS.completionCatalog, { sessionId })
         .then(requireCompletionCatalog),
+      history: Object.freeze({
+        list: (connectionId) => call(TAURI_COMMANDS.commandHistoryList, { connectionId })
+          .then(requireCommandHistory),
+        record: (connectionId, command) => (
+          call(TAURI_COMMANDS.commandHistoryRecord, { connectionId, command })
+            .then(requireCommandHistory)
+        ),
+        remove: (connectionId, command) => (
+          call(TAURI_COMMANDS.commandHistoryRemove, { connectionId, command })
+            .then(requireCommandHistory)
+        ),
+      }),
     }),
     clipboard: Object.freeze({
       readText: () => Promise.resolve()
@@ -410,13 +467,45 @@ function createTauriClient(api) {
           throw normalizeError(error, "FILE_DIALOG_FAILED", "无法打开系统文件选择器。");
         }
       },
+      openDirectory: async (options = {}) => {
+        try {
+          const selection = await api.openDialog({ ...options, directory: true, multiple: false });
+          if (selection === null) return null;
+          if (Array.isArray(selection)) {
+            throw new NativeClientError("DIRECTORY_DIALOG_INVALID", "系统目录选择器返回了无法识别的结果。");
+          }
+          return normalizeDirectoryPath(selection);
+        } catch (error) {
+          throw normalizeError(error, "DIRECTORY_DIALOG_FAILED", "无法打开系统目录选择器。");
+        }
+      },
     }),
     sftp: Object.freeze({
       list: (sessionId, path) => call(TAURI_COMMANDS.sftpList, { sessionId, path }),
+      remove: (sessionId, path, expectedEntryType) => (
+        call(TAURI_COMMANDS.sftpRemove, { sessionId, path, expectedEntryType })
+      ),
+      rename: (sessionId, sourcePath, targetPath, expectedEntryType) => (
+        call(TAURI_COMMANDS.sftpRename, {
+          sessionId,
+          sourcePath,
+          targetPath,
+          expectedEntryType,
+        })
+      ),
       upload: (sessionId, remoteDirectory, files) => {
         const preparedFiles = prepareTauriFiles(files);
         return call(TAURI_COMMANDS.sftpUpload, { sessionId, remoteDirectory, files: preparedFiles });
       },
+      downloadToCache: (sessionId, remotePath) => (
+        call(TAURI_COMMANDS.sftpDownloadToCache, { sessionId, remotePath })
+      ),
+      releaseCachedDownload: (cacheId) => (
+        call(TAURI_COMMANDS.sftpReleaseCachedDownload, { cacheId })
+      ),
+      startCachedDrag: (cacheId) => (
+        call(TAURI_COMMANDS.sftpStartCachedDrag, { cacheId })
+      ),
       cancel: (transferId) => call(TAURI_COMMANDS.sftpCancel, { transferId }),
       retry: (transferId) => call(TAURI_COMMANDS.sftpRetry, { transferId }),
     }),

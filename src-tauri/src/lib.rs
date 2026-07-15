@@ -1,9 +1,12 @@
 #[cfg(not(target_os = "windows"))]
-compile_error!("Remote Terminal 0.3.1 is a Windows-only desktop client.");
+compile_error!("Remote Terminal 0.4.0 is a Windows-only desktop client.");
 
 mod backend;
+mod command_history;
 mod commands;
 mod credentials;
+mod data_directory;
+mod drag_out;
 mod error;
 mod lifecycle;
 mod monitor;
@@ -33,8 +36,16 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             let settings_path = app.path().app_config_dir()?.join("settings.json");
-            let app_state = AppState::load(settings_path).map_err(std::io::Error::other)?;
-            let data_directory = app.path().app_data_dir()?.join("data");
+            let previous_default_data_directory = app.path().app_data_dir()?.join("data");
+            let default_data_directory =
+                data_directory::current_install_data_directory().map_err(std::io::Error::other)?;
+            let app_state = AppState::load(
+                settings_path,
+                default_data_directory,
+                previous_default_data_directory,
+            )
+            .map_err(std::io::Error::other)?;
+            let data_directory = app_state.active_data_directory();
             let legacy_data_directory = app
                 .path()
                 .config_dir()?
@@ -63,6 +74,8 @@ pub fn run() {
             commands::show_main_window,
             commands::quit_app,
             commands::get_backend_status,
+            commands::data_directory_status,
+            commands::data_directory_change,
             commands::connections_list,
             commands::connections_save,
             commands::connections_remove,
@@ -76,8 +89,16 @@ pub fn run() {
             commands::terminal_write,
             commands::terminal_resize,
             commands::completion_catalog,
+            commands::command_history_list,
+            commands::command_history_record,
+            commands::command_history_remove,
             commands::sftp_list,
+            commands::sftp_remove,
+            commands::sftp_rename,
             commands::sftp_upload,
+            commands::sftp_download_to_cache,
+            commands::sftp_release_cached_download,
+            commands::sftp_start_cached_drag,
             commands::sftp_cancel,
             commands::sftp_retry,
             commands::monitor_sample,

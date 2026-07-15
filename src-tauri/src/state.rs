@@ -1,3 +1,7 @@
+use crate::data_directory::{
+    migrate_data_directory, paths_equivalent, validate_configured_data_directory,
+    validate_existing_data_directory,
+};
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,6 +14,8 @@ use std::{
     },
 };
 use uuid::Uuid;
+
+const INSTALL_DATA_MIGRATION_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,10 +31,27 @@ pub enum CloseBehavior {
 struct PersistedSettings {
     #[serde(default)]
     close_behavior: CloseBehavior,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_directory: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    install_data_migration_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_data_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirectoryStatus {
+    pub current_path: String,
+    pub default_path: String,
+    pub pending_path: Option<String>,
+    pub restart_required: bool,
 }
 
 pub struct AppState {
     settings_path: PathBuf,
+    default_data_directory: PathBuf,
+    active_data_directory: PathBuf,
     settings: Mutex<PersistedSettings>,
     pending_close_request: Mutex<Option<String>>,
     // This flag is monotonic: only an explicit quit action may change false to true.
@@ -36,8 +59,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn load(settings_path: PathBuf) -> Result<Self, String> {
-        let settings = match fs::read(&settings_path) {
+    pub fn load(
+        settings_path: PathBuf,
+        default_data_directory: PathBuf,
+        previous_default_data_directory: PathBuf,
+    ) -> Result<Self, String> {
+        let mut settings = match fs::read(&settings_path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
                 format!(
                     "failed to parse persisted settings at {}: {error}",
@@ -54,9 +81,28 @@ impl AppState {
                 ));
             }
         };
+        validate_install_data_migration_settings(&settings)?;
+        let active_data_directory = match settings.data_directory.as_deref() {
+            Some(configured) => {
+                validate_configured_data_directory(configured).map_err(|error| {
+                    format!(
+                        "configured data directory is unavailable ({}): {}",
+                        error.code, error.message
+                    )
+                })?
+            }
+            None => initialize_install_data_directory(
+                &settings_path,
+                &mut settings,
+                &default_data_directory,
+                &previous_default_data_directory,
+            )?,
+        };
 
         Ok(Self {
             settings_path,
+            default_data_directory,
+            active_data_directory,
             settings: Mutex::new(settings),
             pending_close_request: Mutex::new(None),
             is_quitting: AtomicBool::new(false),
@@ -75,12 +121,62 @@ impl AppState {
             .settings
             .lock()
             .map_err(|_| "application settings lock is poisoned".to_string())?;
-        let next = PersistedSettings {
-            close_behavior: behavior,
-        };
+        let mut next = settings.clone();
+        next.close_behavior = behavior;
         persist_settings(&self.settings_path, &next)?;
         *settings = next;
         Ok(())
+    }
+
+    pub fn data_directory_status(&self) -> Result<DataDirectoryStatus, String> {
+        let settings = self
+            .settings
+            .lock()
+            .map_err(|_| "application settings lock is poisoned".to_string())?;
+        let configured = settings
+            .data_directory
+            .as_deref()
+            .unwrap_or(&self.default_data_directory);
+        let pending = (!paths_equivalent(configured, &self.active_data_directory))
+            .then(|| path_text(configured))
+            .transpose()?;
+        Ok(DataDirectoryStatus {
+            current_path: path_text(&self.active_data_directory)?,
+            default_path: path_text(&self.default_data_directory)?,
+            restart_required: pending.is_some(),
+            pending_path: pending,
+        })
+    }
+
+    pub fn active_data_directory(&self) -> PathBuf {
+        self.active_data_directory.clone()
+    }
+
+    /// Persists the next-start pointer only after the migration transaction
+    /// has completed. The active stores remain unchanged until process restart.
+    pub fn set_data_directory(&self, path: &Path) -> Result<DataDirectoryStatus, String> {
+        let path = validate_configured_data_directory(path).map_err(|error| {
+            format!(
+                "selected data directory is unavailable ({}): {}",
+                error.code, error.message
+            )
+        })?;
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| "application settings lock is poisoned".to_string())?;
+        let mut next = settings.clone();
+        if paths_equivalent(&path, &self.default_data_directory) {
+            next.data_directory = None;
+            next.install_data_migration_version = INSTALL_DATA_MIGRATION_VERSION;
+            next.install_data_directory = Some(self.default_data_directory.clone());
+        } else {
+            next.data_directory = Some(path);
+        }
+        persist_settings(&self.settings_path, &next)?;
+        *settings = next;
+        drop(settings);
+        self.data_directory_status()
     }
 
     pub fn is_quitting(&self) -> bool {
@@ -155,6 +251,79 @@ fn is_canonical_uuid(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn initialize_install_data_directory(
+    settings_path: &Path,
+    settings: &mut PersistedSettings,
+    install_data_directory: &Path,
+    previous_default_data_directory: &Path,
+) -> Result<PathBuf, String> {
+    if settings.install_data_migration_version == INSTALL_DATA_MIGRATION_VERSION {
+        let initialized_directory = settings
+            .install_data_directory
+            .as_deref()
+            .ok_or_else(|| "install data migration marker is missing its directory".to_string())?;
+        if paths_equivalent(initialized_directory, install_data_directory) {
+            return validate_configured_data_directory(install_data_directory).map_err(|error| {
+                format!(
+                    "install data directory is unavailable ({}): {}",
+                    error.code, error.message
+                )
+            });
+        }
+        validate_existing_data_directory(initialized_directory).map_err(|error| {
+            format!(
+                "previous install data directory is unavailable ({}): {}",
+                error.code, error.message
+            )
+        })?;
+    }
+
+    let source = settings
+        .install_data_directory
+        .as_deref()
+        .unwrap_or(previous_default_data_directory);
+    migrate_data_directory(source, install_data_directory).map_err(|error| {
+        format!(
+            "failed to migrate data into the install directory ({}): {}",
+            error.code, error.message
+        )
+    })?;
+    let active = validate_configured_data_directory(install_data_directory).map_err(|error| {
+        format!(
+            "install data directory is unavailable ({}): {}",
+            error.code, error.message
+        )
+    })?;
+    settings.install_data_migration_version = INSTALL_DATA_MIGRATION_VERSION;
+    settings.install_data_directory = Some(active.clone());
+    persist_settings(settings_path, settings)?;
+    Ok(active)
+}
+
+fn validate_install_data_migration_settings(settings: &PersistedSettings) -> Result<(), String> {
+    match (
+        settings.install_data_migration_version,
+        settings.install_data_directory.is_some(),
+    ) {
+        (0, false) | (INSTALL_DATA_MIGRATION_VERSION, true) => Ok(()),
+        (0, true) => Err("install data directory exists without a migration version".to_string()),
+        (INSTALL_DATA_MIGRATION_VERSION, false) => {
+            Err("install data migration version exists without a directory".to_string())
+        }
+        _ => Err("install data migration version is not supported".to_string()),
+    }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn path_text(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "data directory path is not valid Unicode".to_string())
+}
+
 fn persist_settings(path: &Path, settings: &PersistedSettings) -> Result<(), String> {
     let parent = path
         .parent()
@@ -180,7 +349,17 @@ fn persist_settings(path: &Path, settings: &PersistedSettings) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{AppState, CloseBehavior};
+    use std::fs;
     use tempfile::tempdir;
+
+    fn load_state(directory: &tempfile::TempDir) -> AppState {
+        AppState::load(
+            directory.path().join("settings.json"),
+            directory.path().join("default-data"),
+            directory.path().join("previous-default-data"),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn close_behavior_uses_stable_wire_values() {
@@ -197,7 +376,7 @@ mod tests {
     #[test]
     fn close_request_token_is_native_one_time_state() {
         let directory = tempdir().unwrap();
-        let state = AppState::load(directory.path().join("settings.json")).unwrap();
+        let state = load_state(&directory);
         let request_id = state.begin_close_request().unwrap();
 
         assert_eq!(state.begin_close_request().unwrap(), request_id);
@@ -209,7 +388,7 @@ mod tests {
     #[test]
     fn clearing_close_request_invalidates_previous_token() {
         let directory = tempdir().unwrap();
-        let state = AppState::load(directory.path().join("settings.json")).unwrap();
+        let state = load_state(&directory);
         let first = state.begin_close_request().unwrap();
         state.clear_close_request().unwrap();
         let second = state.begin_close_request().unwrap();
@@ -217,5 +396,139 @@ mod tests {
         assert_ne!(first, second);
         assert!(!state.consume_close_request(&first).unwrap());
         assert!(state.consume_close_request(&second).unwrap());
+    }
+
+    #[test]
+    fn data_directory_pointer_is_pending_until_restart_and_preserves_close_behavior() {
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let default_path = directory.path().join("default-data");
+        let custom_path = directory.path().join("custom-data");
+        fs::create_dir_all(&custom_path).unwrap();
+        let previous_default = directory.path().join("previous-default-data");
+        let state = AppState::load(
+            settings_path.clone(),
+            default_path.clone(),
+            previous_default.clone(),
+        )
+        .unwrap();
+        state.set_close_behavior(CloseBehavior::Background).unwrap();
+
+        let pending = state.set_data_directory(&custom_path).unwrap();
+
+        assert_eq!(pending.current_path, default_path.to_string_lossy());
+        assert_eq!(pending.pending_path.as_deref(), custom_path.to_str());
+        assert!(pending.restart_required);
+
+        let restarted = AppState::load(settings_path, default_path, previous_default).unwrap();
+        let active = restarted.data_directory_status().unwrap();
+        assert_eq!(active.current_path, custom_path.to_string_lossy());
+        assert_eq!(active.pending_path, None);
+        assert!(!active.restart_required);
+        assert_eq!(
+            restarted.close_behavior().unwrap(),
+            CloseBehavior::Background
+        );
+    }
+
+    #[test]
+    fn default_directory_pointer_is_idempotent_after_startup_initialization() {
+        let directory = tempdir().unwrap();
+        let default_path = directory.path().join("default-data");
+        let state = AppState::load(
+            directory.path().join("settings.json"),
+            default_path.clone(),
+            directory.path().join("previous-default-data"),
+        )
+        .unwrap();
+
+        let status = state.set_data_directory(&default_path).unwrap();
+
+        assert_eq!(status.current_path, default_path.to_string_lossy());
+        assert_eq!(status.pending_path, None);
+        assert!(!status.restart_required);
+        assert!(default_path.is_dir());
+    }
+
+    #[test]
+    fn first_install_default_start_migrates_previous_tauri_data_once() {
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let install_data = directory.path().join("install").join("data");
+        let previous_default = directory.path().join("roaming-app-data").join("data");
+        fs::create_dir_all(&previous_default).unwrap();
+        fs::write(
+            previous_default.join("connections.json"),
+            br#"{"version":1,"connections":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            previous_default.join("known-hosts.json"),
+            br#"{"version":1,"hosts":{}}"#,
+        )
+        .unwrap();
+
+        let state = AppState::load(
+            settings_path.clone(),
+            install_data.clone(),
+            previous_default.clone(),
+        )
+        .unwrap();
+
+        let status = state.data_directory_status().unwrap();
+        assert_eq!(status.current_path, install_data.to_string_lossy());
+        assert_eq!(status.default_path, install_data.to_string_lossy());
+        assert_eq!(
+            fs::read(install_data.join("connections.json")).unwrap(),
+            fs::read(previous_default.join("connections.json")).unwrap()
+        );
+        assert!(previous_default.join("connections.json").is_file());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(persisted["installDataMigrationVersion"], 1);
+        assert_eq!(
+            persisted["installDataDirectory"],
+            install_data.to_string_lossy().as_ref()
+        );
+
+        fs::write(
+            previous_default.join("connections.json"),
+            br#"{"version":999,"connections":[]}"#,
+        )
+        .unwrap();
+        let restarted = AppState::load(settings_path, install_data, previous_default).unwrap();
+        assert!(!restarted.data_directory_status().unwrap().restart_required);
+    }
+
+    #[test]
+    fn custom_directory_skips_install_default_migration() {
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let install_data = directory.path().join("install").join("data");
+        let custom_data = directory.path().join("custom-data");
+        let previous_default = directory.path().join("previous-default-data");
+        fs::create_dir_all(&custom_data).unwrap();
+        fs::create_dir_all(&previous_default).unwrap();
+        fs::write(
+            previous_default.join("connections.json"),
+            br#"{"version":999,"connections":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "closeBehavior": "ask",
+                "dataDirectory": custom_data,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::load(settings_path, install_data.clone(), previous_default).unwrap();
+
+        let status = state.data_directory_status().unwrap();
+        assert_eq!(status.current_path, custom_data.to_string_lossy());
+        assert_eq!(status.default_path, install_data.to_string_lossy());
+        assert!(!install_data.exists());
     }
 }

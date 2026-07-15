@@ -19,7 +19,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { toMonitorPercent } from "../services/monitor-metrics.js";
+import { toMonitorPercent } from "../../services/monitor-metrics.js";
 
 export function MonitorDashboard({ server, metrics, sampledAt, loading = false, error = "" }) {
   if (!metrics) {

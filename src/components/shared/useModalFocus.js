@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { isImeCompositionKeyEvent } from "../services/command-completion.js";
+import { isImeCompositionKeyEvent } from "../../services/command-completion.js";
 
 const FOCUSABLE_SELECTOR = [
   "button:not([disabled])",

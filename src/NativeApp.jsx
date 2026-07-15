@@ -1,15 +1,16 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HardDrives, Plus } from "@phosphor-icons/react";
-import { ActivityRail } from "./components/ActivityRail.jsx";
-import { BottomPanel } from "./components/BottomPanel.jsx";
-import { CloseRequestDialog } from "./components/CloseRequestDialog.jsx";
-import { ConnectionDialog } from "./components/ConnectionDialog.jsx";
-import { ExplorerPanel } from "./components/ExplorerPanel.jsx";
-import { HostKeyDialog } from "./components/HostKeyDialog.jsx";
-import { PasswordDialog } from "./components/PasswordDialog.jsx";
-import { SettingsDialog } from "./components/SettingsDialog.jsx";
-import { StatusBar } from "./components/StatusBar.jsx";
-import { TopBar } from "./components/TopBar.jsx";
+import { ActivityRail } from "./components/shell/ActivityRail.jsx";
+import { BottomPanel } from "./components/shell/BottomPanel.jsx";
+import { CloseRequestDialog } from "./components/connections/CloseRequestDialog.jsx";
+import { ConnectionDialog } from "./components/connections/ConnectionDialog.jsx";
+import { ExplorerPanel } from "./components/files/ExplorerPanel.jsx";
+import { HostKeyDialog } from "./components/connections/HostKeyDialog.jsx";
+import { PasswordDialog } from "./components/connections/PasswordDialog.jsx";
+import { SettingsDialog } from "./components/settings/SettingsDialog.jsx";
+import { StatusBar } from "./components/shell/StatusBar.jsx";
+import { TopBar } from "./components/shell/TopBar.jsx";
+import { DEFAULT_EXPLORER_WIDTH, WorkspaceResizeHandle } from "./components/shell/WorkspaceResizeHandle.jsx";
 import { getNativeClient } from "./native/client.js";
 import { resolveInterfaceColorScheme } from "./services/interface-theme.js";
 import "./native-styles.css";
@@ -17,11 +18,10 @@ import "./update-styles.css";
 import "./credential-styles.css";
 import "./theme-styles.css";
 
-const NativeTerminalPane = lazy(() => import("./components/NativeTerminalPane.jsx")
+const NativeTerminalPane = lazy(() => import("./components/terminal/NativeTerminalPane.jsx")
   .then(({ NativeTerminalPane: component }) => ({ default: component })));
 
-const DEFAULT_BOTTOM_PANEL_HEIGHT = 168;
-const DEFAULT_MONITOR_PANEL_HEIGHT = 344;
+const DEFAULT_BOTTOM_PANEL_HEIGHT = 344;
 const ACTIVE_TRANSFER_STATES = new Set(["queued", "uploading", "cancelling", "finalizing"]);
 const DEFAULT_APPEARANCE = {
   accent: "#9d84f8",
@@ -31,6 +31,14 @@ const DEFAULT_APPEARANCE = {
   wallpaperName: "",
   wallpaperUrl: "",
 };
+
+function accentContrast(hexColor) {
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hexColor || "");
+  if (!match) return "#ffffff";
+  const [red, green, blue] = match.slice(1).map((channel) => Number.parseInt(channel, 16));
+  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+  return luminance > 0.62 ? "#111827" : "#ffffff";
+}
 
 function createWorkspace(connectionId) {
   return {
@@ -94,7 +102,8 @@ export function NativeApp() {
   const [workspaceOrder, setWorkspaceOrder] = useState([]);
   const [activeConnectionId, setActiveConnectionId] = useState(null);
   const [activeRail, setActiveRail] = useState("connections");
-  const [railVisible, setRailVisible] = useState(true);
+  const [railExpanded, setRailExpanded] = useState(false);
+  const [explorerWidth, setExplorerWidth] = useState(DEFAULT_EXPLORER_WIDTH);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const [connectionDialog, setConnectionDialog] = useState({ open: false, view: "list" });
   const [passwordConnectionId, setPasswordConnectionId] = useState(null);
@@ -104,6 +113,7 @@ export function NativeApp() {
   const [closeBehaviorError, setCloseBehaviorError] = useState("");
   const [closeRequestOpen, setCloseRequestOpen] = useState(false);
   const [closeRequestId, setCloseRequestId] = useState(null);
+  const [closeRequestActiveSessionCount, setCloseRequestActiveSessionCount] = useState(0);
   const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
   const [interfaceThemeMode, setInterfaceThemeMode] = useState("system");
@@ -115,13 +125,11 @@ export function NativeApp() {
   const [updateState, setUpdateState] = useState(null);
   const [updateActionError, setUpdateActionError] = useState("");
   const [credentialStorage, setCredentialStorage] = useState({ available: false, protection: "windows-user" });
+  const [dataDirectoryStatus, setDataDirectoryStatus] = useState(null);
   const [activeBottomTab, setActiveBottomTab] = useState("transfer");
   const [bottomVisible, setBottomVisible] = useState(true);
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
-  const [bottomPanelHeights, setBottomPanelHeights] = useState({
-    standard: DEFAULT_BOTTOM_PANEL_HEIGHT,
-    monitor: DEFAULT_MONITOR_PANEL_HEIGHT,
-  });
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT);
   const activeConnectionIdRef = useRef(null);
   const pendingSecretsRef = useRef(new Map());
   const attemptsRef = useRef(new Map());
@@ -279,6 +287,18 @@ export function NativeApp() {
 
   useEffect(() => {
     let cancelled = false;
+    void client.storage.dataDirectoryStatus()
+      .then((status) => {
+        if (!cancelled) setDataDirectoryStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setDataDirectoryStatus(null);
+      });
+    return () => { cancelled = true; };
+  }, [client]);
+
+  useEffect(() => {
+    let cancelled = false;
     void client.credentials.status()
       .then((status) => {
         if (!cancelled) setCredentialStorage(status);
@@ -330,11 +350,16 @@ export function NativeApp() {
     const unsubscribe = client.events.onCloseRequested((event) => {
       if (disposed) return;
       if (typeof event?.requestId !== "string" || !event.requestId) return;
+      const activeSessionCount = Number.isSafeInteger(event?.activeSessionCount)
+        && event.activeSessionCount > 0
+        ? event.activeSessionCount
+        : 0;
       const activeTransferCount = Number.isSafeInteger(event?.activeTransferCount)
         && event.activeTransferCount > 0
         ? event.activeTransferCount
         : 0;
       setCloseRequestId(event.requestId);
+      setCloseRequestActiveSessionCount(activeSessionCount);
       setCloseRequestActiveTransferCount(activeTransferCount);
       setCloseRequestOpen(true);
     });
@@ -421,7 +446,10 @@ export function NativeApp() {
   const passwordServer = servers.find((server) => server.id === passwordConnectionId) || null;
   const hasActiveTransfers = Object.values(workspaces).some((workspace) => workspace.transfers
     .some((transfer) => ACTIVE_TRANSFER_STATES.has(transfer.state)));
-  const closeDialogHasActiveTransfers = hasActiveTransfers || closeRequestActiveTransferCount > 0;
+  const closeDialogActiveTransferCount = Math.max(
+    hasActiveTransfers ? 1 : 0,
+    closeRequestActiveTransferCount,
+  );
 
   async function checkForUpdates() {
     setUpdateActionError("");
@@ -439,6 +467,16 @@ export function NativeApp() {
     } catch (error) {
       setUpdateActionError(error.message);
     }
+  }
+
+  function chooseDataDirectory() {
+    return client.dialog.openDirectory({ title: "选择 Remote Terminal 数据目录" });
+  }
+
+  async function changeDataDirectory(targetPath) {
+    const result = await client.storage.changeDataDirectory(targetPath);
+    setDataDirectoryStatus(result.status);
+    return result;
   }
 
   async function changeCloseBehavior(behavior, { rethrow = false } = {}) {
@@ -459,6 +497,7 @@ export function NativeApp() {
     await client.app.resolveCloseRequest(closeRequestId, action);
     setCloseRequestOpen(false);
     setCloseRequestId(null);
+    setCloseRequestActiveSessionCount(0);
     setCloseRequestActiveTransferCount(0);
   }
 
@@ -722,6 +761,66 @@ export function NativeApp() {
     }
   }
 
+  async function prepareRemoteFileDrag(remotePath) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspace = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspace?.sessionId) {
+      throw new Error("当前工作区没有可用的 SFTP 会话。");
+    }
+    return client.sftp.downloadToCache(workspace.sessionId, remotePath);
+  }
+
+  function startRemoteFileDrag(cacheId) {
+    return client.sftp.startCachedDrag(cacheId);
+  }
+
+  function releaseRemoteFileDrag(cacheId) {
+    return client.sftp.releaseCachedDownload(cacheId);
+  }
+
+  async function deleteRemoteEntry(remotePath, expectedEntryType) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspace = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspace?.sessionId) {
+      throw new Error("当前工作区没有可用的 SFTP 会话。");
+    }
+    try {
+      return await client.sftp.remove(workspace.sessionId, remotePath, expectedEntryType);
+    } catch (error) {
+      addIssue(
+        connectionId,
+        "删除远程条目失败",
+        error?.message || "无法删除远程条目。",
+        error?.code || "SFTP_DELETE_FAILED",
+      );
+      throw error;
+    }
+  }
+
+  async function renameRemoteEntry(sourcePath, targetPath, expectedEntryType) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspace = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspace?.sessionId) {
+      throw new Error("当前工作区没有可用的 SFTP 会话。");
+    }
+    try {
+      return await client.sftp.rename(
+        workspace.sessionId,
+        sourcePath,
+        targetPath,
+        expectedEntryType,
+      );
+    } catch (error) {
+      addIssue(
+        connectionId,
+        "重命名或移动远程条目失败",
+        error?.message || "无法重命名或移动远程条目。",
+        error?.code || "SFTP_RENAME_FAILED",
+      );
+      throw error;
+    }
+  }
+
   function openBottomTab(tab) {
     setActiveBottomTab(tab);
     setBottomVisible(true);
@@ -748,8 +847,6 @@ export function NativeApp() {
     return () => window.clearInterval(interval);
   }, [activeConnectionId, activeWorkspace?.sessionId, activeWorkspace?.state, sampleMonitor]);
 
-  const panelHeightKey = activeBottomTab === "monitor" ? "monitor" : "standard";
-  const bottomPanelHeight = bottomPanelHeights[panelHeightKey];
   const taskPanelHeight = bottomVisible && activeServer ? (bottomCollapsed ? 52 : bottomPanelHeight) : 0;
 
   if (loading) {
@@ -764,29 +861,31 @@ export function NativeApp() {
       className="app-root"
       data-color-scheme={interfaceColorScheme}
       data-theme-mode={interfaceThemeMode}
-      style={{ "--accent": appearance.accent }}
+      style={{ "--accent": appearance.accent, "--accent-contrast": accentContrast(appearance.accent) }}
     >
-      <main className={`app-shell ${railVisible ? "" : "is-rail-hidden"}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>
+      <main className={`app-shell ${railExpanded ? "is-rail-expanded" : ""}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>
         <TopBar
           server={activeServer}
           servers={servers}
           metrics={activeWorkspace?.metrics || null}
           menuOpen={serverMenuOpen}
+          railExpanded={railExpanded}
           onToggleMenu={() => setServerMenuOpen((value) => !value)}
           onSelectServer={selectServer}
           onAddServer={() => openConnections("new")}
-          onToggleRail={() => setRailVisible((value) => !value)}
+          onToggleRail={() => setRailExpanded((value) => !value)}
           onOpenMonitor={() => activeServer && openBottomTab("monitor")}
         />
-        {railVisible && <ActivityRail
+        <ActivityRail
           activeItem={activeRail}
+          expanded={railExpanded}
           settingsOpen={settingsOpen}
           themeMode={interfaceThemeMode}
           onChange={handleRailChange}
           onThemeModeChange={setInterfaceThemeMode}
           onOpenSettings={() => setSettingsOpen(true)}
-        />}
-        <div className="workbench">
+        />
+        <div className="workbench" style={{ "--explorer-w": `${explorerWidth}px` }}>
           <ExplorerPanel
             mode={activeServer ? activeRail : "connections"}
             server={activeServer}
@@ -801,12 +900,28 @@ export function NativeApp() {
             onUpload={uploadFiles}
             onSelectUploadFiles={selectUploadFiles}
             onNativeDragDropSubscribe={client.events.onDragDrop}
+            onPrepareDragOut={prepareRemoteFileDrag}
+            onStartDragOut={startRemoteFileDrag}
+            onReleaseDragOut={releaseRemoteFileDrag}
+            onDragOutError={(error) => activeConnectionId && addIssue(
+              activeConnectionId,
+              "无法把远程文件拖到电脑",
+              error?.message || "远程文件拖出失败。",
+              error?.code || "SFTP_DRAG_OUT_FAILED",
+            )}
+            onRenameRemoteEntry={renameRemoteEntry}
+            onDeleteRemoteEntry={deleteRemoteEntry}
             onRefresh={() => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory)}
             onNavigate={(path) => void loadDirectory(activeConnectionId, path)}
             onOpenBottomTab={openBottomTab}
             onCreateSession={() => openConnections("list")}
             onSelectServer={selectServer}
             onOpenConnections={openConnections}
+          />
+          <WorkspaceResizeHandle
+            width={explorerWidth}
+            onResize={setExplorerWidth}
+            onReset={() => setExplorerWidth(DEFAULT_EXPLORER_WIDTH)}
           />
           {sessions.length ? (
             <Suspense fallback={<section className="terminal-pane native-empty-workspace" role="status">正在加载终端组件…</section>}>
@@ -843,11 +958,8 @@ export function NativeApp() {
             onTabChange={openBottomTab}
             onToggle={() => setBottomCollapsed((value) => !value)}
             onClose={() => setBottomVisible(false)}
-            onResize={(height) => setBottomPanelHeights((current) => ({ ...current, [panelHeightKey]: height }))}
-            onResetResize={() => setBottomPanelHeights((current) => ({
-              ...current,
-              [panelHeightKey]: panelHeightKey === "monitor" ? DEFAULT_MONITOR_PANEL_HEIGHT : DEFAULT_BOTTOM_PANEL_HEIGHT,
-            }))}
+            onResize={setBottomPanelHeight}
+            onResetResize={() => setBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT)}
             onCancel={(transferId) => void client.sftp.cancel(transferId).catch((error) => addIssue(activeConnectionId, "取消传输失败", error.message, error.code))}
             onRetry={(transferId) => void client.sftp.retry(transferId).catch((error) => addIssue(activeConnectionId, "重试传输失败", error.message, error.code))}
           />}
@@ -877,7 +989,8 @@ export function NativeApp() {
       <HostKeyDialog prompt={hostKeyPrompt} onAccept={acceptHostKey} onClose={closeHostKeyPrompt} />
       <CloseRequestDialog
         open={closeRequestOpen}
-        hasActiveTransfers={closeDialogHasActiveTransfers}
+        activeSessionCount={closeRequestActiveSessionCount}
+        activeTransferCount={closeDialogActiveTransferCount}
         onResolve={resolveCloseRequest}
       />
       <SettingsDialog
@@ -886,6 +999,9 @@ export function NativeApp() {
         onThemeChange={(patch) => setAppearance((current) => ({ ...current, ...patch }))}
         onWallpaperChange={({ name, url }) => setAppearance((current) => ({ ...current, wallpaperName: name, wallpaperUrl: url }))}
         onRemoveWallpaper={() => setAppearance((current) => ({ ...current, wallpaperName: "", wallpaperUrl: "" }))}
+        dataDirectoryStatus={dataDirectoryStatus}
+        onChooseDataDirectory={chooseDataDirectory}
+        onChangeDataDirectory={changeDataDirectory}
         closeBehavior={closeBehavior}
         closeBehaviorError={closeBehaviorError}
         onCloseBehaviorChange={changeCloseBehavior}

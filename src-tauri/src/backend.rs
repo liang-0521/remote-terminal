@@ -1,13 +1,16 @@
 use crate::{
+    command_history::{CommandHistoryStore, COMMAND_HISTORY_FILE},
     credentials::{CredentialRemoval, CredentialStatus, CredentialStore},
+    drag_out::{start_native_file_drag, NativeFileDragResult},
     error::{AppError, AppResult},
     monitor::{
         calculate_cpu_usage, calculate_network_rates, parse_counters, parse_snapshot,
         MonitorSnapshot, COUNTER_COMMAND, MONITOR_SNAPSHOT_COMMAND,
     },
     ssh::{
-        CompletionItem, ConnectResult, DirectoryListing, DisconnectResult, SshConnection,
-        SshManager, TerminalAttachResult, TerminalDimensions, TransferSummary, UploadFile,
+        CachedDownload, CachedDownloadRelease, CompletionItem, ConnectResult, DirectoryListing,
+        DisconnectResult, RemoteEntryRemoval, RemoteEntryRename, SshConnection, SshManager,
+        TerminalAttachResult, TerminalDimensions, TransferSummary, UploadFile,
     },
     storage::{
         migrate_legacy_electron_data, validate_id, Connection, ConnectionDraft, ConnectionRemoval,
@@ -26,11 +29,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::AppHandle;
-use tokio::sync::RwLock as AsyncRwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use uuid::Uuid;
 
 const CONNECTIONS_FILE: &str = "connections.json";
 const KNOWN_HOSTS_FILE: &str = "known-hosts.json";
+const DOWNLOAD_CACHE_DIRECTORY: &str = "download-cache";
 const HOST_KEY_CHALLENGE_LIFETIME: Duration = Duration::from_secs(2 * 60);
 const MONITOR_SAMPLE_DELAY: Duration = Duration::from_millis(600);
 
@@ -172,7 +176,10 @@ pub struct MonitorSample {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitPreparation {
     Ready,
-    NeedsConfirmation { active_transfer_count: usize },
+    NeedsConfirmation {
+        active_session_count: usize,
+        active_transfer_count: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +198,7 @@ enum OperationBlock {
     Open = 0,
     UpdateInstall = 1,
     Shutdown = 2,
+    DataDirectoryRestart = 3,
 }
 
 /// Single owner for all durable native data and live SSH state.
@@ -200,9 +208,12 @@ enum OperationBlock {
 /// shutdown. Once shutdown preparation succeeds, new transfers stay blocked.
 pub struct BackendState {
     connections: ConnectionStore,
+    command_history: CommandHistoryStore,
     known_hosts: KnownHostsStore,
     credentials: CredentialStore,
     ssh: SshManager,
+    cached_download_gate: AsyncMutex<()>,
+    durable_data_gate: Mutex<()>,
     host_key_challenges: Mutex<HashMap<String, HostKeyChallenge>>,
     monitor_sampling: Arc<Mutex<HashSet<String>>>,
     operation_gate: AsyncRwLock<()>,
@@ -222,9 +233,12 @@ impl BackendState {
         let credentials = CredentialStore::windows()?;
         Ok(Self {
             connections: ConnectionStore::new(data_directory.join(CONNECTIONS_FILE)),
+            command_history: CommandHistoryStore::new(data_directory.join(COMMAND_HISTORY_FILE)),
             known_hosts: KnownHostsStore::new(data_directory.join(KNOWN_HOSTS_FILE)),
             credentials,
-            ssh: SshManager::new(app),
+            ssh: SshManager::new(app, data_directory.join(DOWNLOAD_CACHE_DIRECTORY))?,
+            cached_download_gate: AsyncMutex::new(()),
+            durable_data_gate: Mutex::new(()),
             host_key_challenges: Mutex::new(HashMap::new()),
             monitor_sampling: Arc::new(Mutex::new(HashSet::new())),
             operation_gate: AsyncRwLock::new(()),
@@ -236,6 +250,7 @@ impl BackendState {
         BackendStatus {
             adapters: [
                 "storage",
+                "command-history",
                 "credentials",
                 "ssh",
                 "sftp",
@@ -278,10 +293,14 @@ impl BackendState {
     }
 
     pub fn save_connection(&self, connection: ConnectionDraft) -> AppResult<Connection> {
+        let _guard = self.lock_durable_data()?;
+        self.ensure_operations_open()?;
         self.connections.save(connection)
     }
 
     pub fn remove_connection(&self, connection_id: &str) -> AppResult<ConnectionRemoval> {
+        let _guard = self.lock_durable_data()?;
+        self.ensure_operations_open()?;
         let connection = self.connections.get(connection_id)?;
         self.credentials.remove(&connection.id)?;
         self.connections.remove(&connection.id)
@@ -297,6 +316,8 @@ impl BackendState {
     }
 
     pub async fn probe_host_key(&self, connection_id: &str) -> AppResult<HostKeyProbeResult> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
         let connection = self.connections.get(connection_id)?;
         let observed = self
             .ssh
@@ -350,6 +371,8 @@ impl BackendState {
     }
 
     pub fn accept_host_key(&self, challenge_id: &str) -> AppResult<HostKeyAcceptResult> {
+        let _guard = self.lock_durable_data()?;
+        self.ensure_operations_open()?;
         let id = validate_id(challenge_id, "指纹确认标识")?;
         let now = Instant::now();
         let challenge = {
@@ -456,12 +479,66 @@ impl BackendState {
         self.ssh.completion_catalog(session_id).await
     }
 
+    pub fn list_command_history(&self, connection_id: &str) -> AppResult<Vec<String>> {
+        let connection = self.connections.get(connection_id)?;
+        self.command_history.list(&connection.id)
+    }
+
+    pub fn record_command_history(
+        &self,
+        connection_id: &str,
+        command: &str,
+    ) -> AppResult<Vec<String>> {
+        let _guard = self.lock_durable_data()?;
+        self.ensure_operations_open()?;
+        let connection = self.connections.get(connection_id)?;
+        self.command_history.record(&connection.id, command)
+    }
+
+    pub fn remove_command_history(
+        &self,
+        connection_id: &str,
+        command: &str,
+    ) -> AppResult<Vec<String>> {
+        let _guard = self.lock_durable_data()?;
+        self.ensure_operations_open()?;
+        let connection = self.connections.get(connection_id)?;
+        self.command_history.remove(&connection.id, command)
+    }
+
     pub async fn list_directory(
         &self,
         session_id: &str,
         path: &str,
     ) -> AppResult<DirectoryListing> {
         self.ssh.list_directory(session_id, path).await
+    }
+
+    pub async fn remove_remote_entry(
+        &self,
+        session_id: &str,
+        path: &str,
+        expected_entry_type: &str,
+    ) -> AppResult<RemoteEntryRemoval> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        self.ssh
+            .remove_remote_entry(session_id, path, expected_entry_type)
+            .await
+    }
+
+    pub async fn rename_remote_entry(
+        &self,
+        session_id: &str,
+        source_path: &str,
+        target_path: &str,
+        expected_entry_type: &str,
+    ) -> AppResult<RemoteEntryRename> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        self.ssh
+            .rename_remote_entry(session_id, source_path, target_path, expected_entry_type)
+            .await
     }
 
     pub async fn upload_files(
@@ -475,6 +552,62 @@ impl BackendState {
         self.ssh
             .upload_files(session_id, remote_directory, files)
             .await
+    }
+
+    pub async fn download_file_to_cache(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+    ) -> AppResult<CachedDownload> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        self.ssh.download_to_cache(session_id, remote_path).await
+    }
+
+    pub async fn release_cached_download(
+        &self,
+        cache_id: &str,
+    ) -> AppResult<CachedDownloadRelease> {
+        let _guard = self.cached_download_gate.lock().await;
+        self.ssh.release_cached_download(cache_id).await
+    }
+
+    pub async fn start_cached_file_drag(
+        &self,
+        cache_id: &str,
+        app: AppHandle,
+    ) -> AppResult<NativeFileDragResult> {
+        let _operation_guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        let _cache_guard = self.cached_download_gate.lock().await;
+        let (cached, canonical_path) = self.ssh.cached_download_for_drag(cache_id).await?;
+        let drag_result = start_native_file_drag(app, canonical_path).await;
+        let release_result = self.ssh.release_cached_download(&cached.cache_id).await;
+
+        match drag_result {
+            Ok(mut result) => {
+                match release_result {
+                    Ok(release) if release.released => result.cache_released = true,
+                    Ok(_) => {
+                        result.cleanup_error = Some(AppError::new(
+                            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                            "系统拖放已经结束，但对应下载缓存未能确认释放。",
+                        ));
+                    }
+                    Err(error) => result.cleanup_error = Some(error),
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                if let Err(cleanup_error) = release_result {
+                    eprintln!(
+                        "[remote-terminal] cleanup native drag cache: {}",
+                        cleanup_error.code
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     pub async fn cancel_transfer(&self, transfer_id: &str) -> AppResult<TransferSummary> {
@@ -517,18 +650,49 @@ impl BackendState {
         })
     }
 
-    pub async fn active_transfer_count(&self) -> usize {
-        self.ssh.active_transfers().await.len()
+    pub async fn exit_activity(&self) -> (usize, usize) {
+        let (active_session_count, transfer_activity) = tokio::join!(
+            self.ssh.active_session_count(),
+            self.ssh.transfer_activity()
+        );
+        (active_session_count, transfer_activity.active_count)
+    }
+
+    /// Serializes a data-directory transaction with connect/upload/retry and
+    /// rejects it while any live SSH session or active transfer still exists.
+    /// The filesystem operation remains inside the write gate, so new remote
+    /// work cannot start between the idle check and bootstrap pointer commit.
+    pub async fn with_data_directory_change<T>(
+        &self,
+        operation: impl FnOnce() -> AppResult<(T, bool)>,
+    ) -> AppResult<T> {
+        let _guard = self.operation_gate.write().await;
+        self.ensure_operations_open()?;
+        let (active_session_count, transfer_activity) = tokio::join!(
+            self.ssh.active_session_count(),
+            self.ssh.transfer_activity()
+        );
+        ensure_data_directory_idle(active_session_count, transfer_activity.active_count)?;
+        let _data_guard = self.lock_durable_data()?;
+        let (result, restart_required) = operation()?;
+        if restart_required {
+            self.operation_block
+                .store(OperationBlock::DataDirectoryRestart as u8, Ordering::SeqCst);
+        }
+        Ok(result)
     }
 
     pub async fn prepare_exit(&self, force: bool) -> ExitPreparation {
         let _guard = self.operation_gate.write().await;
         if !force {
-            let active_transfer_count = self.ssh.transfer_activity().await.active_count;
-            if active_transfer_count > 0 {
-                return ExitPreparation::NeedsConfirmation {
-                    active_transfer_count,
-                };
+            let (active_session_count, transfer_activity) = tokio::join!(
+                self.ssh.active_session_count(),
+                self.ssh.transfer_activity()
+            );
+            if let Some(preparation) =
+                exit_confirmation_for_activity(active_session_count, transfer_activity.active_count)
+            {
+                return preparation;
             }
         }
         self.operation_block
@@ -579,14 +743,23 @@ impl BackendState {
     }
 
     fn ensure_operations_open(&self) -> AppResult<()> {
-        if self.operation_block.load(Ordering::SeqCst) != OperationBlock::Open as u8 {
-            Err(AppError::new(
+        match self.operation_block.load(Ordering::SeqCst) {
+            value if value == OperationBlock::Open as u8 => Ok(()),
+            value if value == OperationBlock::DataDirectoryRestart as u8 => Err(AppError::new(
+                "DATA_DIRECTORY_RESTART_REQUIRED",
+                "数据目录已经切换，请重启客户端后再修改连接或开始远程操作。",
+            )),
+            _ => Err(AppError::new(
                 "NATIVE_SHUTDOWN_IN_PROGRESS",
                 "客户端正在关闭或准备安装更新，不能开始新的远程操作。",
-            ))
-        } else {
-            Ok(())
+            )),
         }
+    }
+
+    fn lock_durable_data(&self) -> AppResult<std::sync::MutexGuard<'_, ()>> {
+        self.durable_data_gate
+            .lock()
+            .map_err(|_| AppError::new("STORE_LOCK_FAILED", "客户端本地配置正在被另一个操作占用。"))
     }
 }
 
@@ -599,6 +772,33 @@ fn release_update_block(operation_block: &AtomicU8) -> bool {
             Ordering::SeqCst,
         )
         .is_ok()
+}
+
+fn ensure_data_directory_idle(
+    active_session_count: usize,
+    active_transfer_count: usize,
+) -> AppResult<()> {
+    if active_session_count == 0 && active_transfer_count == 0 {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "DATA_DIRECTORY_BUSY",
+        format!(
+            "仍有 {active_session_count} 个 SSH 会话或 {active_transfer_count} 个文件传输任务未结束，请全部断开后再修改数据目录。"
+        ),
+    ))
+}
+
+fn exit_confirmation_for_activity(
+    active_session_count: usize,
+    active_transfer_count: usize,
+) -> Option<ExitPreparation> {
+    (active_session_count > 0 || active_transfer_count > 0).then_some(
+        ExitPreparation::NeedsConfirmation {
+            active_session_count,
+            active_transfer_count,
+        },
+    )
 }
 
 struct MonitorSamplingGuard {
@@ -705,5 +905,44 @@ mod tests {
         block.store(OperationBlock::Shutdown as u8, Ordering::SeqCst);
         assert!(!release_update_block(&block));
         assert_eq!(block.load(Ordering::SeqCst), OperationBlock::Shutdown as u8);
+
+        block.store(OperationBlock::DataDirectoryRestart as u8, Ordering::SeqCst);
+        assert!(!release_update_block(&block));
+        assert_eq!(
+            block.load(Ordering::SeqCst),
+            OperationBlock::DataDirectoryRestart as u8
+        );
+    }
+
+    #[test]
+    fn data_directory_change_requires_no_sessions_or_transfers() {
+        assert!(ensure_data_directory_idle(0, 0).is_ok());
+        assert_eq!(
+            ensure_data_directory_idle(1, 0).unwrap_err().code,
+            "DATA_DIRECTORY_BUSY"
+        );
+        assert_eq!(
+            ensure_data_directory_idle(0, 1).unwrap_err().code,
+            "DATA_DIRECTORY_BUSY"
+        );
+    }
+
+    #[test]
+    fn exit_confirmation_covers_sessions_and_transfers_once() {
+        assert_eq!(exit_confirmation_for_activity(0, 0), None);
+        assert_eq!(
+            exit_confirmation_for_activity(2, 0),
+            Some(ExitPreparation::NeedsConfirmation {
+                active_session_count: 2,
+                active_transfer_count: 0,
+            })
+        );
+        assert_eq!(
+            exit_confirmation_for_activity(1, 3),
+            Some(ExitPreparation::NeedsConfirmation {
+                active_session_count: 1,
+                active_transfer_count: 3,
+            })
+        );
     }
 }

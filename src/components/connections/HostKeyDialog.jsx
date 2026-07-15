@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldCheck, ShieldWarning, X } from "@phosphor-icons/react";
-import { useModalFocus } from "./useModalFocus.js";
+import { useModalFocus } from "../shared/useModalFocus.js";
 
 export function HostKeyDialog({ prompt, onAccept, onClose }) {
   const [pending, setPending] = useState(false);

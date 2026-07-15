@@ -1,4 +1,7 @@
-use crate::error::{AppError, AppResult};
+use crate::{
+    command_history::{validate_command_history_file, COMMAND_HISTORY_FILE},
+    error::{AppError, AppResult},
+};
 use atomic_write_file::AtomicWriteFile;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -16,6 +19,12 @@ const CONNECTIONS_FILE: &str = "connections.json";
 const KNOWN_HOSTS_FILE: &str = "known-hosts.json";
 const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 const LEGACY_MIGRATION_FILE: &str = "legacy-electron-v0.1-import.json";
+pub(crate) const MANAGED_DATA_FILES: [&str; 4] = [
+    CONNECTIONS_FILE,
+    KNOWN_HOSTS_FILE,
+    LEGACY_MIGRATION_FILE,
+    COMMAND_HISTORY_FILE,
+];
 const LEGACY_MIGRATION_VERSION: u32 = 1;
 const CONTROL_CHARACTER_PATTERN: fn(char) -> bool = |character| character.is_control();
 static LEGACY_MIGRATION_GATE: OnceLock<Mutex<()>> = OnceLock::new();
@@ -30,7 +39,6 @@ pub enum AuthMethod {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionDraft {
     pub name: String,
-    pub group: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -42,7 +50,10 @@ pub struct ConnectionDraft {
 pub struct Connection {
     pub id: String,
     pub name: String,
-    pub group: String,
+    /// Accepted only while reading pre-0.4 stores. It is deliberately omitted
+    /// from IPC responses and every subsequent atomic store rewrite.
+    #[serde(default, rename = "group", skip_serializing)]
+    legacy_group: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -295,7 +306,7 @@ impl ConnectionStore {
         let connection = Connection {
             id: Uuid::new_v4().to_string(),
             name: draft.name,
-            group: draft.group,
+            legacy_group: None,
             host: draft.host,
             port: draft.port,
             username: draft.username,
@@ -697,6 +708,39 @@ pub fn validate_password(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Validates every durable JSON document owned by the configurable data
+/// directory. Credentials and WebView2 profile/cache files are intentionally
+/// outside this allowlist and are never read by this validator.
+pub(crate) fn validate_data_directory(directory: &Path) -> AppResult<()> {
+    let connections_path = directory.join(CONNECTIONS_FILE);
+    if regular_file_exists(&connections_path)? {
+        ConnectionStore::new(connections_path).list()?;
+    }
+
+    let known_hosts_path = directory.join(KNOWN_HOSTS_FILE);
+    if regular_file_exists(&known_hosts_path)? {
+        KnownHostsStore::new(known_hosts_path).list()?;
+    }
+
+    let journal_path = directory.join(LEGACY_MIGRATION_FILE);
+    if let Some(journal) = read_optional_json::<LegacyMigrationJournal>(&journal_path)? {
+        match journal {
+            LegacyMigrationJournal::Pending {
+                version,
+                created_at,
+                plan,
+            } => validate_pending_migration(version, &created_at, &plan)?,
+            LegacyMigrationJournal::Completed {
+                version,
+                completed_at,
+                result,
+            } => validate_completed_migration(version, &completed_at, &result)?,
+        }
+    }
+    validate_command_history_file(&directory.join(COMMAND_HISTORY_FILE))?;
+    Ok(())
+}
+
 pub fn known_host_key(host: &str, port: u16) -> AppResult<String> {
     let host = validate_string(host, "主机地址", 1, 253, false)?;
     validate_port(port)?;
@@ -706,7 +750,6 @@ pub fn known_host_key(host: &str, port: u16) -> AppResult<String> {
 fn validate_connection_draft(draft: ConnectionDraft) -> AppResult<ConnectionDraft> {
     Ok(ConnectionDraft {
         name: validate_string(&draft.name, "连接名称", 1, 80, true)?,
-        group: validate_string(&draft.group, "分组", 1, 80, true)?,
         host: validate_string(&draft.host, "主机地址", 1, 253, false)?,
         port: validate_port(draft.port)?,
         username: validate_string(&draft.username, "用户名", 1, 128, false)?,
@@ -747,7 +790,6 @@ fn validate_persisted_connection(connection: &Connection) -> AppResult<()> {
     }
     let normalized = validate_connection_draft(ConnectionDraft {
         name: connection.name.clone(),
-        group: connection.group.clone(),
         host: connection.host.clone(),
         port: connection.port,
         username: connection.username.clone(),
@@ -755,11 +797,17 @@ fn validate_persisted_connection(connection: &Connection) -> AppResult<()> {
     })
     .map_err(|_| store_corrupt("连接配置中存在无效字段。"))?;
     if normalized.name != connection.name
-        || normalized.group != connection.group
         || normalized.host != connection.host
         || normalized.username != connection.username
     {
         return Err(store_corrupt("连接配置中存在未规范化字段。"));
+    }
+    if let Some(group) = &connection.legacy_group {
+        let normalized_group = validate_string(group, "旧版分组", 1, 80, true)
+            .map_err(|_| store_corrupt("连接配置中存在无效旧版分组。"))?;
+        if normalized_group != *group {
+            return Err(store_corrupt("连接配置中存在未规范化旧版分组。"));
+        }
     }
     validate_timestamp(&connection.created_at)
         .and_then(|_| validate_timestamp(&connection.updated_at))
@@ -934,7 +982,6 @@ mod tests {
     fn draft() -> ConnectionDraft {
         ConnectionDraft {
             name: "测试服务器".to_string(),
-            group: "测试".to_string(),
             host: "example.test".to_string(),
             port: 22,
             username: "root".to_string(),
@@ -946,7 +993,7 @@ mod tests {
         Connection {
             id: id.to_string(),
             name: name.to_string(),
-            group: "旧版".to_string(),
+            legacy_group: None,
             host: host.to_string(),
             port: 22,
             username: "root".to_string(),
@@ -1004,6 +1051,16 @@ mod tests {
         assert!(
             serde_json::from_value::<ConnectionDraft>(serde_json::json!({
                 "name": "测试服务器",
+                "host": "example.test",
+                "port": 22,
+                "username": "root",
+                "authMethod": "password",
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ConnectionDraft>(serde_json::json!({
+                "name": "测试服务器",
                 "group": "测试",
                 "host": "example.test",
                 "port": 22,
@@ -1018,6 +1075,29 @@ mod tests {
         invalid.username = "  ".to_string();
         let error = store.save(invalid).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn legacy_group_is_read_but_omitted_on_next_store_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(CONNECTIONS_FILE);
+        let legacy = format!(
+            r#"{{"version":1,"connections":[{{"id":"{CONNECTION_ID}","name":"旧连接","group":"旧版","host":"legacy.test","port":22,"username":"root","authMethod":"password","createdAt":"{LEGACY_TIMESTAMP}","updatedAt":"{LEGACY_TIMESTAMP}"}}]}}"#
+        );
+        fs::write(&path, legacy).unwrap();
+        let store = ConnectionStore::new(path.clone());
+
+        let loaded = store.list().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(serde_json::to_value(&loaded[0])
+            .unwrap()
+            .get("group")
+            .is_none());
+        store.save(draft()).unwrap();
+
+        let rewritten = fs::read_to_string(path).unwrap();
+        assert!(!rewritten.contains("\"group\""));
+        assert_eq!(store.list().unwrap().len(), 2);
     }
 
     #[test]
@@ -1055,7 +1135,7 @@ mod tests {
             connections: vec![Connection {
                 id: CONNECTION_ID.to_string(),
                 name: "旧连接".to_string(),
-                group: "旧版".to_string(),
+                legacy_group: None,
                 host: "legacy.test".to_string(),
                 port: 22,
                 username: "legacy-user".to_string(),

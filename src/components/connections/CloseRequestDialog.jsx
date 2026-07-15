@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLineDown, Power, WarningCircle, X } from "@phosphor-icons/react";
-import { useModalFocus } from "./useModalFocus.js";
+import { useModalFocus } from "../shared/useModalFocus.js";
 
-export function CloseRequestDialog({ open, hasActiveTransfers = false, onResolve }) {
+export function CloseRequestDialog({
+  open,
+  activeSessionCount = 0,
+  activeTransferCount = 0,
+  onResolve,
+}) {
   const [remember, setRemember] = useState(false);
   const [pending, setPending] = useState(false);
-  const [exitArmed, setExitArmed] = useState(false);
   const [error, setError] = useState("");
   const dialogRef = useRef(null);
   const backgroundButtonRef = useRef(null);
@@ -22,7 +26,6 @@ export function CloseRequestDialog({ open, hasActiveTransfers = false, onResolve
     if (!open) return;
     setRemember(false);
     setPending(false);
-    setExitArmed(false);
     setError("");
   }, [open]);
 
@@ -30,12 +33,6 @@ export function CloseRequestDialog({ open, hasActiveTransfers = false, onResolve
 
   async function resolve(action) {
     if (pending) return;
-    if (action === "exit" && hasActiveTransfers && !exitArmed) {
-      setExitArmed(true);
-      setError("仍有文件正在传输。再次点击确认后会中断这些任务并退出客户端。");
-      return;
-    }
-
     setPending(true);
     setError("");
     try {
@@ -80,21 +77,27 @@ export function CloseRequestDialog({ open, hasActiveTransfers = false, onResolve
             </button>
             <button
               type="button"
-              className={`close-request-dialog__choice is-danger ${exitArmed ? "is-armed" : ""}`}
+              className="close-request-dialog__choice is-danger"
               disabled={pending}
               onClick={() => resolve("exit")}
             >
               <Power size={22} weight="duotone" />
               <span>
-                <strong>{exitArmed ? "再次点击确认退出" : "直接退出"}</strong>
+                <strong>退出客户端</strong>
                 <small>关闭全部 SSH 会话并结束客户端进程。</small>
               </span>
             </button>
           </div>
-          {hasActiveTransfers && (
+          {(activeSessionCount > 0 || activeTransferCount > 0) && (
             <div className="close-request-dialog__warning" role="note">
               <WarningCircle size={18} weight="duotone" />
-              <span>检测到活动文件传输。后台运行不会中断；直接退出需要再次确认。</span>
+              <span>
+                当前仍有
+                {activeSessionCount > 0 ? ` ${activeSessionCount} 个 SSH 连接` : ""}
+                {activeSessionCount > 0 && activeTransferCount > 0 ? "、" : ""}
+                {activeTransferCount > 0 ? ` ${activeTransferCount} 个文件传输` : ""}
+                。后台运行不会中断；退出将关闭这些连接和任务。
+              </span>
             </div>
           )}
           <label className="native-credential-option" htmlFor="remember-close-behavior">

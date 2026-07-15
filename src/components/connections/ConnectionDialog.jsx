@@ -4,7 +4,6 @@ import {
   ArrowRight,
   Eye,
   EyeSlash,
-  FolderSimple,
   HardDrives,
   Key,
   Plus,
@@ -13,11 +12,10 @@ import {
   User,
   X,
 } from "@phosphor-icons/react";
-import { useModalFocus } from "./useModalFocus.js";
+import { useModalFocus } from "../shared/useModalFocus.js";
 
 const EMPTY_FORM = {
   name: "",
-  group: "生产环境",
   host: "",
   port: "22",
   username: "root",
@@ -156,7 +154,6 @@ export function ConnectionDialog({
 
     const connection = {
       name: form.name.trim(),
-      group: form.group.trim(),
       host: form.host.trim(),
       port: Number(form.port),
       username: form.username.trim(),
@@ -293,10 +290,6 @@ export function ConnectionDialog({
                         {isActive && <span className="connection-manager__current">当前工作区</span>}
                       </div>
                       <span className="connection-manager__endpoint">{server.endpoint}</span>
-                      <span className="connection-manager__group">
-                        <FolderSimple size={14} />
-                        {server.group || "未分组"}
-                      </span>
                       <span className={`connection-manager__credential ${server.hasSavedPassword ? "is-saved" : ""}`}>
                         <Key size={14} />
                         {server.hasSavedPassword ? "密码已由 Windows 加密保存" : "每次连接询问密码"}
@@ -371,18 +364,7 @@ export function ConnectionDialog({
                 />
               </Field>
 
-              <Field label="分组" name="group">
-                <input
-                  id="connection-group"
-                  name="group"
-                  value={form.group}
-                  onChange={updateField}
-                  placeholder="例如：生产环境"
-                  autoComplete="off"
-                />
-              </Field>
-
-              <Field label="主机地址" name="host" error={errors.host} required wide>
+              <Field label="主机地址" name="host" error={errors.host} required>
                 <input
                   id="connection-host"
                   name="host"

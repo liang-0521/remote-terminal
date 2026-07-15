@@ -56,6 +56,11 @@ try {
     monitor: true,
     sftpAtomicUpload: true,
     overwriteBlocked: true,
+    sftpRealDelete: true,
+    recursiveDeleteBlocked: true,
+    sftpRealRenameMove: true,
+    renameOverwriteBlocked: true,
+    directorySelfMoveBlocked: true,
   }));
 } finally {
   await fixture.close();

@@ -8,11 +8,11 @@ import {
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
-import { IconButton } from "./IconButton.jsx";
-import { MonitorErrorBoundary } from "./MonitorErrorBoundary.js";
+import { IconButton } from "../shared/IconButton.jsx";
+import { MonitorErrorBoundary } from "../monitoring/MonitorErrorBoundary.js";
 
 function createLazyMonitorDashboard() {
-  return lazy(() => import("./MonitorDashboard.jsx")
+  return lazy(() => import("../monitoring/MonitorDashboard.jsx")
     .then(({ MonitorDashboard: component }) => ({ default: component })));
 }
 

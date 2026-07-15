@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MonitorErrorBoundary } from "../src/components/MonitorErrorBoundary.js";
+import { MonitorErrorBoundary } from "../src/components/monitoring/MonitorErrorBoundary.js";
 import { toMonitorPercent } from "../src/services/monitor-metrics.js";
 
 function renderBoundaryFallback(error, props = {}) {

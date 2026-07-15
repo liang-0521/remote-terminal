@@ -105,16 +105,23 @@ export const COMMAND_COMPLETIONS = Object.freeze([
     group: "容器",
     keywords: ["docker", "compose", "容器编排", "服务状态", "container services"],
   },
+  {
+    command: "clear",
+    description: "清空当前终端屏幕",
+    group: "终端",
+    keywords: ["clear", "清屏", "清理", "清空终端", "clear terminal", "clear screen"],
+  },
 ].map((completion) => Object.freeze({
   ...completion,
+  curated: true,
   source: "builtin",
   sourceLabel: "内置语义",
 })));
 
 const SOURCE_DETAILS = Object.freeze({
   builtin: Object.freeze({ label: "内置语义", group: "内置语义", priority: 2 }),
-  "remote-command": Object.freeze({ label: "远端命令", group: "远端命令", priority: 0 }),
-  history: Object.freeze({ label: "Shell 历史", group: "Shell 历史", priority: 1 }),
+  "remote-command": Object.freeze({ label: "远端命令", group: "远端命令", priority: 1 }),
+  history: Object.freeze({ label: "本机历史", group: "本机历史", priority: 0 }),
   directory: Object.freeze({ label: "当前目录", group: "当前目录", priority: 3 }),
 });
 
@@ -143,8 +150,8 @@ function normalizeDynamicCompletion(item) {
   const description = typeof item.description === "string" && item.description.trim()
     ? item.description.trim()
     : source === "history"
-      ? "该服务器账户的 Shell 历史命令"
-      : `远端可执行命令：${command}`;
+      ? "本机为此服务器保存的命令历史"
+      : "";
   return {
     command,
     description,
@@ -177,9 +184,12 @@ function deduplicateCompletions(completions) {
     const candidatePriority = sourceDetails(completion.source).priority;
     const primary = candidatePriority < existingPriority ? completion : existing;
     const secondary = primary === existing ? completion : existing;
+    const curated = existing.curated ? existing : completion.curated ? completion : null;
     byCommand.set(key, {
       ...primary,
-      description: primary.description || secondary.description,
+      description: curated?.description || primary.description || secondary.description,
+      group: curated?.group || primary.group,
+      curated: Boolean(primary.curated || secondary.curated),
       keywords: mergeKeywords(primary.keywords, secondary.keywords),
     });
   }
@@ -217,9 +227,12 @@ export function buildCommandCompletionCatalog({ remoteCompletions = [], director
   const remote = Array.isArray(remoteCompletions)
     ? remoteCompletions.map(normalizeDynamicCompletion).filter(Boolean)
     : [];
+  const history = remote.filter((completion) => completion.source === "history");
+  const remoteCommands = remote.filter((completion) => completion.source !== "history");
   return deduplicateCompletions([
+    ...history,
     ...COMMAND_COMPLETIONS,
-    ...remote,
+    ...remoteCommands,
     ...createDirectoryCompletions(directoryEntries),
   ]);
 }
@@ -293,19 +306,31 @@ function rankCompletion(completion, query, sourceIndex) {
 
 export function searchCommandCompletions(
   query,
-  { completions = COMMAND_COMPLETIONS, limit = DEFAULT_RESULT_LIMIT } = {},
+  {
+    completions = COMMAND_COMPLETIONS,
+    limit = DEFAULT_RESULT_LIMIT,
+    prioritizeHistory = true,
+  } = {},
 ) {
   const normalizedQuery = normalizeSearchText(query);
   const resultLimit = Number.isInteger(limit) && limit >= 0 ? limit : DEFAULT_RESULT_LIMIT;
   if (!normalizedQuery) {
-    return completions.slice(0, resultLimit).map((completion) => ({ ...completion, matchType: "default" }));
+    return [
+      ...completions.filter((completion) => completion.source === "history"),
+      ...completions.filter((completion) => (
+        completion.source !== "history" && completion.curated === true
+      )),
+    ]
+      .slice(0, resultLimit)
+      .map((completion) => ({ ...completion, matchType: "default" }));
   }
 
   return completions
     .map((completion, sourceIndex) => rankCompletion(completion, normalizedQuery, sourceIndex))
     .filter(Boolean)
     .sort((left, right) => (
-      left.tier - right.tier
+      (prioritizeHistory ? Number(right.completion.source === "history") - Number(left.completion.source === "history") : 0)
+      || left.tier - right.tier
       || left.detail - right.detail
       || left.sourceIndex - right.sourceIndex
     ))
@@ -321,15 +346,30 @@ export function searchInlineCommandCompletions(
   const resultLimit = Number.isInteger(limit) && limit >= 0 ? limit : 10;
   if (!normalizedQuery) return [];
 
+  // Once the current line is already an executable catalog command, the
+  // inline surface should get out of the way. Longer names remain available
+  // from the explicit command library instead of replacing a complete input.
+  if (completions.some((completion) => normalizeSearchText(completion.command) === normalizedQuery)) {
+    return [];
+  }
+
   if (/^[\x20-\x7e]+$/.test(normalizedQuery)) {
     const commandPrefixes = completions
-      .filter((completion) => normalizeSearchText(completion.command).startsWith(normalizedQuery))
+      .filter((completion) => {
+        const command = normalizeSearchText(completion.command);
+        return command !== normalizedQuery && command.startsWith(normalizedQuery);
+      })
       .slice(0, resultLimit)
       .map((completion) => ({ ...completion, matchType: "prefix" }));
     if (commandPrefixes.length) return commandPrefixes;
   }
 
-  return searchCommandCompletions(normalizedQuery, { completions, limit: resultLimit });
+  return searchCommandCompletions(normalizedQuery, {
+    completions,
+    limit: resultLimit,
+    prioritizeHistory: false,
+  })
+    .filter((completion) => normalizeSearchText(completion.command) !== normalizedQuery);
 }
 
 export function nextCommandCompletionIndex(currentIndex, key, length) {
@@ -347,7 +387,7 @@ export function createTerminalInputState() {
   return { reliable: true, text: "" };
 }
 
-export function advanceTerminalInputState(state, data) {
+function transitionTerminalInputState(state, data, onExecute = undefined) {
   if (!state || typeof state.reliable !== "boolean" || typeof state.text !== "string") {
     throw new TypeError("终端输入状态无效");
   }
@@ -355,7 +395,13 @@ export function advanceTerminalInputState(state, data) {
 
   let next = { reliable: state.reliable, text: state.text };
   for (const character of data) {
-    if (["\r", "\n", "\u0003"].includes(character)) {
+    if (["\r", "\n"].includes(character)) {
+      const command = next.reliable ? next.text.trim() : "";
+      if (command) onExecute?.(command);
+      next = createTerminalInputState();
+      continue;
+    }
+    if (character === "\u0003") {
       next = createTerminalInputState();
       continue;
     }
@@ -378,6 +424,16 @@ export function advanceTerminalInputState(state, data) {
     }
   }
   return next;
+}
+
+export function advanceTerminalInputState(state, data) {
+  return transitionTerminalInputState(state, data);
+}
+
+export function collectExecutedTerminalCommands(state, data) {
+  const commands = [];
+  transitionTerminalInputState(state, data, (command) => commands.push(command));
+  return commands;
 }
 
 export function createTerminalCompletionInput(state, command) {

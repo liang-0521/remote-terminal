@@ -4,6 +4,7 @@ import {
   MagnifyingGlass,
   Plus,
   Terminal as TerminalIcon,
+  Trash,
   X,
 } from "@phosphor-icons/react";
 import { FitAddon } from "@xterm/addon-fit";
@@ -13,6 +14,7 @@ import {
   buildCommandCompletionCatalog,
   advanceTerminalInputState,
   calculateInlineCompletionPosition,
+  collectExecutedTerminalCommands,
   createTerminalCompletionInput,
   createTerminalInputState,
   isImeCompositionKeyEvent,
@@ -21,8 +23,8 @@ import {
   searchCommandCompletions,
   searchInlineCommandCompletions,
   shouldAutoOpenCommandCompletion,
-} from "../services/command-completion.js";
-import { IconButton } from "./IconButton.jsx";
+} from "../../services/command-completion.js";
+import { IconButton } from "../shared/IconButton.jsx";
 
 export function NativeTerminalPane({
   client,
@@ -181,6 +183,7 @@ function XtermSurface({
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
   const terminalWriteQueueRef = useRef(Promise.resolve());
+  const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
   const commandSearchInputRef = useRef(null);
   const completionCatalogRef = useRef([]);
@@ -193,13 +196,29 @@ function XtermSurface({
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
   const [commandSearchQuery, setCommandSearchQuery] = useState("");
   const [commandSearchIndex, setCommandSearchIndex] = useState(0);
+  const [localHistory, setLocalHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState("");
+  const [historyPendingCommands, setHistoryPendingCommands] = useState(() => new Set());
+  const [historyCandidateNotice, setHistoryCandidateNotice] = useState("");
   const [terminalInput, setTerminalInput] = useState(() => createTerminalInputState());
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [inlineAnchor, setInlineAnchor] = useState({ left: 12, top: 42, placement: "below" });
+  const localHistoryCompletions = useMemo(
+    () => localHistory.map((command) => ({ command, source: "history" })),
+    [localHistory],
+  );
   const completionCatalog = useMemo(() => buildCommandCompletionCatalog({
-    remoteCompletions,
+    remoteCompletions: [
+      ...localHistoryCompletions,
+      ...(Array.isArray(remoteCompletions) ? remoteCompletions : []),
+    ],
     directoryEntries,
-  }), [directoryEntries, remoteCompletions]);
+  }), [
+    directoryEntries,
+    localHistoryCompletions,
+    remoteCompletions,
+  ]);
   const inlineSuggestions = useMemo(
     () => terminalInput.reliable
       ? searchInlineCommandCompletions(terminalInput.text, { completions: completionCatalog, limit: 10 })
@@ -307,6 +326,30 @@ function XtermSurface({
     return request;
   }, [client, sessionId]);
 
+  const enqueueHistoryMutation = useCallback((operation) => {
+    const request = historyMutationQueueRef.current.then(operation);
+    historyMutationQueueRef.current = request.catch(() => undefined);
+    return request;
+  }, []);
+
+  const reportHistoryError = useCallback((error) => {
+    const message = error instanceof Error && error.message
+      ? error.message
+      : "本机命令历史操作失败。";
+    setHistoryError(message);
+  }, []);
+
+  const recordExecutedCommands = useCallback((commands) => {
+    for (const command of commands) {
+      void enqueueHistoryMutation(() => client.terminal.history.record(connectionId, command))
+        .then((nextHistory) => {
+          setLocalHistory(nextHistory);
+          setHistoryError("");
+        })
+        .catch(reportHistoryError);
+    }
+  }, [client, connectionId, enqueueHistoryMutation, reportHistoryError]);
+
   const insertCompletion = useCallback((command) => {
     const input = createTerminalCompletionInput(terminalInputRef.current, command);
     if (!input) {
@@ -329,6 +372,55 @@ function XtermSurface({
         onError?.(error, connectionId);
       });
   }, [closeCommandSearch, closeInlineCompletion, connectionId, enqueueTerminalWrite, focusTerminalSoon, onError]);
+
+  const removeHistoryCandidate = useCallback((item) => {
+    if (item?.source !== "history") return;
+    setHistoryPendingCommands((current) => {
+      const next = new Set(current);
+      next.add(item.command);
+      return next;
+    });
+    setHistoryCandidateNotice("");
+    void enqueueHistoryMutation(() => client.terminal.history.remove(connectionId, item.command))
+      .then((nextHistory) => {
+        setLocalHistory(nextHistory);
+        setHistoryError("");
+        setCommandSearchIndex(0);
+        setHistoryCandidateNotice(`已从本机为此服务器保存的命令历史中永久删除“${item.command}”。`);
+      })
+      .catch(reportHistoryError)
+      .finally(() => {
+        setHistoryPendingCommands((current) => {
+          const next = new Set(current);
+          next.delete(item.command);
+          return next;
+        });
+        window.requestAnimationFrame(() => commandSearchInputRef.current?.focus());
+      });
+  }, [client, connectionId, enqueueHistoryMutation, reportHistoryError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLocalHistory([]);
+    setHistoryLoading(true);
+    setHistoryError("");
+    setHistoryPendingCommands(new Set());
+    setHistoryCandidateNotice("");
+    const loadRequest = client.terminal.history.list(connectionId);
+    historyMutationQueueRef.current = loadRequest.catch(() => undefined);
+    void loadRequest
+      .then((commands) => {
+        if (cancelled) return;
+        setLocalHistory(commands);
+        setHistoryLoading(false);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setHistoryLoading(false);
+        reportHistoryError(error);
+      });
+    return () => { cancelled = true; };
+  }, [client, connectionId, reportHistoryError]);
 
   useEffect(() => {
     if (!commandSearchOpen || selectedSearchIndex < 0) return undefined;
@@ -463,8 +555,11 @@ function XtermSurface({
       });
     });
     const inputSubscription = terminal.onData((data) => {
+      const executedCommands = collectExecutedTerminalCommands(terminalInputRef.current, data);
       trackTerminalInput(data);
-      void enqueueTerminalWrite(data).catch((error) => onError?.(error, connectionId));
+      void enqueueTerminalWrite(data)
+        .then(() => recordExecutedCommands(executedCommands))
+        .catch((error) => onError?.(error, connectionId));
     });
     const resizeSubscription = terminal.onResize(({ cols, rows }) => {
       if (!activeRef.current) return;
@@ -505,7 +600,7 @@ function XtermSurface({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, sessionId, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, recordExecutedCommands, sessionId, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
 
   return (
     <>
@@ -521,7 +616,7 @@ function XtermSurface({
         onMouseDown={(event) => event.preventDefault()}
         onClick={toggleCommandSearch}
       >
-        <MagnifyingGlass size={15} /> 命令搜索{completionLoading ? "（加载中）" : completionError ? "（部分可用）" : ""} <kbd>Ctrl+Shift+P</kbd>
+        <MagnifyingGlass size={15} /> 命令搜索{completionLoading || historyLoading ? "（加载中）" : completionError || historyError ? "（部分可用）" : ""} <kbd>Ctrl+Shift+P</kbd>
       </button>
       {commandSearchOpen && active && (
         <section id={commandSearchId} className="native-command-search" role="dialog" aria-label="命令搜索">
@@ -574,13 +669,20 @@ function XtermSurface({
                 selected={selectedSearchIndex === index}
                 onHover={() => setCommandSearchIndex(index)}
                 onChoose={() => insertCompletion(item.command)}
+                onRemove={item.source === "history" ? () => removeHistoryCandidate(item) : undefined}
+                removePending={historyPendingCommands.has(item.command)}
               />
             )) : <div className="native-completion-empty">没有找到匹配的命令或用途</div>}
           </div>
           <footer>
-            {completionLoading && "正在加载远端命令与 Shell 历史；内置语义和当前目录候选已可用。 "}
-            {completionError && `远端补全加载失败：${completionError}；内置语义和当前目录候选仍可用。 `}
-            支持中文用途和英文命令/意图搜索 · ↑/↓ 选择 · Enter 插入 · Esc 关闭
+            {historyCandidateNotice && <span className="native-command-search__notice" role="status">{historyCandidateNotice}</span>}
+            <span>
+              {completionLoading && "正在加载远端可执行命令；内置语义、当前目录和本机历史候选已可用。 "}
+              {historyLoading && "正在加载本机为此服务器保存的命令历史。 "}
+              {completionError && `远端命令加载失败：${completionError}；其他本机候选仍可用。 `}
+              {historyError && `本机命令历史操作失败：${historyError} `}
+              支持中文用途和英文命令/意图搜索 · ↑/↓ 选择 · Enter 插入 · Esc 关闭
+            </span>
           </footer>
         </section>
       )}
@@ -617,24 +719,42 @@ function XtermSurface({
   );
 }
 
-function CompletionOption({ id, item, selected, compact = false, onHover, onChoose }) {
+function CompletionOption({ id, item, selected, compact = false, onHover, onChoose, onRemove, removePending = false }) {
   const CandidateIcon = item.source === "history" ? ClockCounterClockwise : TerminalIcon;
-  return (
+  const option = (
     <button
       id={id}
       type="button"
       role="option"
       tabIndex={-1}
       aria-selected={selected}
-      className={`native-completion-option ${compact ? "is-compact" : ""} ${selected ? "is-selected" : ""}`.trim()}
+      className={`native-completion-option ${item.description ? "has-description" : ""} ${compact ? "is-compact" : ""} ${selected ? "is-selected" : ""}`.trim()}
       onMouseDown={(event) => event.preventDefault()}
       onMouseEnter={onHover}
       onClick={onChoose}
     >
       <CandidateIcon size={16} aria-hidden="true" />
       <code>{item.command}</code>
-      <span>{item.description}</span>
+      {item.description && <span>{item.description}</span>}
       {!compact && <small>{item.sourceLabel || item.group}</small>}
     </button>
+  );
+  if (!onRemove || compact) return option;
+  return (
+    <div className={`native-completion-row ${selected ? "is-selected" : ""}`} role="presentation">
+      {option}
+      <button
+        type="button"
+        className="native-completion-option__remove"
+        aria-label={`从本机为此服务器保存的命令历史中永久删除 ${item.command}`}
+        title="从本机命令历史永久删除；不会删除远端可执行命令"
+        disabled={removePending}
+        onMouseDown={(event) => event.preventDefault()}
+        onMouseEnter={onHover}
+        onClick={onRemove}
+      >
+        <Trash size={15} aria-hidden="true" />
+      </button>
+    </div>
   );
 }

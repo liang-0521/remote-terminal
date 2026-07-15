@@ -1,6 +1,6 @@
 {
   "name": "remote-terminal",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Windows client for SSH terminals, SFTP transfers, and Linux performance monitoring.",
   "author": "Liang",
   "private": true,
@@ -11,7 +11,6 @@
     "build:icon": "tauri icon build/icon.svg",
     "build": "vite build",
     "package:win": "tauri build --bundles nsis",
-    "package:win:unsigned": "tauri build --bundles nsis --config src-tauri/tauri.unsigned-0.3.1.conf.json",
     "test": "node --test --test-isolation=none",
     "tauri": "tauri"
   },

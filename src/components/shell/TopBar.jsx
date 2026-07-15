@@ -9,7 +9,7 @@ import {
   Memory,
   Plus,
 } from "@phosphor-icons/react";
-import { IconButton } from "./IconButton.jsx";
+import { IconButton } from "../shared/IconButton.jsx";
 
 const NATIVE_CONNECTION_LABELS = {
   connected: "已连接",
@@ -18,13 +18,14 @@ const NATIVE_CONNECTION_LABELS = {
   error: "连接失败",
 };
 
-export function TopBar({ server, servers, metrics, menuOpen, onToggleMenu, onSelectServer, onAddServer, onToggleRail, onOpenMonitor }) {
+export function TopBar({ server, servers, metrics, menuOpen, railExpanded, onToggleMenu, onSelectServer, onAddServer, onToggleRail, onOpenMonitor }) {
   const pickerRef = useRef(null);
   const triggerRef = useRef(null);
   const menuItemRefs = useRef([]);
   const pendingFocusIndexRef = useRef(null);
   const toggleMenuRef = useRef(onToggleMenu);
   const connected = server?.state === "connected";
+  const hasServers = servers.length > 0;
   const memoryPercent = metrics && metrics.memoryTotal > 0 ? (metrics.memoryUsed / metrics.memoryTotal) * 100 : null;
   const swapPercent = metrics && metrics.swapTotal > 0 ? (metrics.swapUsed / metrics.swapTotal) * 100 : metrics?.swapTotal === 0 ? 0 : null;
   const connectionLabel = server
@@ -78,6 +79,10 @@ export function TopBar({ server, servers, metrics, menuOpen, onToggleMenu, onSel
     };
     if (!(event.key in focusByKey) || menuOpen) return;
     event.preventDefault();
+    if (!hasServers) {
+      onAddServer();
+      return;
+    }
     pendingFocusIndexRef.current = focusByKey[event.key];
     onToggleMenu();
   }
@@ -100,7 +105,12 @@ export function TopBar({ server, servers, metrics, menuOpen, onToggleMenu, onSel
 
   return (
     <header className="top-bar">
-      <IconButton label="折叠导航" className="top-bar__menu" onClick={onToggleRail}>
+      <IconButton
+        label={railExpanded ? "折叠导航为仅图标" : "展开导航并显示名称"}
+        className="top-bar__menu"
+        aria-expanded={railExpanded}
+        onClick={onToggleRail}
+      >
         <List size={24} />
       </IconButton>
       <span className="top-bar__product">服务器</span>
@@ -110,16 +120,17 @@ export function TopBar({ server, servers, metrics, menuOpen, onToggleMenu, onSel
           id="server-picker-trigger"
           type="button"
           className="server-picker__trigger"
-          aria-controls="server-picker-menu"
-          aria-expanded={menuOpen}
-          aria-haspopup="menu"
-          onClick={toggleServerMenu}
+          aria-controls={hasServers ? "server-picker-menu" : undefined}
+          aria-expanded={hasServers ? menuOpen : undefined}
+          aria-haspopup={hasServers ? "menu" : undefined}
+          aria-label={hasServers ? "选择服务器" : "新增 SSH 服务器"}
+          onClick={hasServers ? toggleServerMenu : onAddServer}
           onKeyDown={openMenuFromKeyboard}
         >
           <span>{server?.endpoint || "选择或新增服务器"}</span>
-          <CaretDown size={16} />
+          <CaretDown className={`server-picker__caret ${menuOpen ? "is-open" : ""}`} size={16} />
         </button>
-        {menuOpen && (
+        {menuOpen && hasServers && (
           <div id="server-picker-menu" className="server-picker__menu" role="menu" aria-labelledby="server-picker-trigger" onKeyDown={handleMenuKeyDown}>
             {servers.map((item, index) => {
               const current = item.id === server?.id;

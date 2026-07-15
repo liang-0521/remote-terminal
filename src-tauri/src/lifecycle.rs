@@ -13,6 +13,7 @@ pub const CLOSE_REQUESTED_EVENT: &str = "app://close-requested";
 struct CloseRequestedPayload {
     request_id: String,
     behavior: CloseBehavior,
+    active_session_count: usize,
     active_transfer_count: usize,
 }
 
@@ -64,13 +65,20 @@ pub fn request_exit_with_confirmation<R: Runtime>(app: &AppHandle<R>, behavior: 
                 exit_now(&app);
             }
             ExitPreparation::NeedsConfirmation {
+                active_session_count,
                 active_transfer_count,
             } => {
                 if let Err(error) = restore_main_window(&app) {
                     log_lifecycle_error("restore window for active transfer warning", &error);
                     return;
                 }
-                emit_close_request(&app, &request_id, behavior, active_transfer_count);
+                emit_close_request(
+                    &app,
+                    &request_id,
+                    behavior,
+                    active_session_count,
+                    active_transfer_count,
+                );
             }
         }
     });
@@ -119,9 +127,15 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
                 }
             };
             tauri::async_runtime::spawn(async move {
-                let active_transfer_count =
-                    app.state::<BackendState>().active_transfer_count().await;
-                emit_close_request(&app, &request_id, CloseBehavior::Ask, active_transfer_count);
+                let (active_session_count, active_transfer_count) =
+                    app.state::<BackendState>().exit_activity().await;
+                emit_close_request(
+                    &app,
+                    &request_id,
+                    CloseBehavior::Ask,
+                    active_session_count,
+                    active_transfer_count,
+                );
             });
         }
         Err(_) => {
@@ -134,6 +148,7 @@ fn emit_close_request<R: Runtime>(
     app: &AppHandle<R>,
     request_id: &str,
     behavior: CloseBehavior,
+    active_session_count: usize,
     active_transfer_count: usize,
 ) {
     let state = app.state::<AppState>();
@@ -143,6 +158,7 @@ fn emit_close_request<R: Runtime>(
             CloseRequestedPayload {
                 request_id: request_id.to_string(),
                 behavior,
+                active_session_count,
                 active_transfer_count,
             },
         )
@@ -184,6 +200,7 @@ mod tests {
         let payload = CloseRequestedPayload {
             request_id: "8f2d624f-36cc-4a81-8724-73b165ea6f5f".to_string(),
             behavior: CloseBehavior::Exit,
+            active_session_count: 1,
             active_transfer_count: 2,
         };
         assert_eq!(
@@ -191,6 +208,7 @@ mod tests {
             serde_json::json!({
                 "requestId": "8f2d624f-36cc-4a81-8724-73b165ea6f5f",
                 "behavior": "exit",
+                "activeSessionCount": 1,
                 "activeTransferCount": 2,
             })
         );

@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    fs,
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex,
@@ -23,7 +25,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 use tokio::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, Notify, RwLock, Semaphore},
     time::timeout,
@@ -38,14 +40,15 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(8);
 const EXEC_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const TERMINAL_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 const TERMINAL_WRITE_LIMIT: usize = 65_536;
-const MAX_UPLOAD_CONCURRENCY: usize = 3;
+const MAX_TRANSFER_CONCURRENCY: usize = 3;
 const MAX_UPLOAD_FILES: usize = 100;
 const MAX_REMOTE_PATH_LENGTH: usize = 4096;
+const MAX_WINDOWS_FILE_NAME_UTF16: usize = 255;
 const MAX_COMPLETION_COMMANDS: usize = 10_000;
-const MAX_COMPLETION_HISTORY: usize = 400;
+const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 const COMMANDS_MARKER: &str = "@@REMOTE_TERMINAL:COMMANDS@@";
-const HISTORY_MARKER: &str = "@@REMOTE_TERMINAL:HISTORY@@";
 
 const COMPLETION_CATALOG_COMMAND: &str = r#"export LC_ALL=C
 printf '%s\n' '@@REMOTE_TERMINAL:COMMANDS@@'
@@ -61,14 +64,6 @@ else
     done
   done
   IFS=$old_ifs
-fi
-printf '%s\n' '@@REMOTE_TERMINAL:HISTORY@@'
-if [ "${SHELL##*/}" = "zsh" ] && [ -r "$HOME/.zsh_history" ]; then
-  tail -n 400 "$HOME/.zsh_history"
-elif [ -r "$HOME/.bash_history" ]; then
-  tail -n 400 "$HOME/.bash_history"
-elif [ -r "$HOME/.zsh_history" ]; then
-  tail -n 400 "$HOME/.zsh_history"
 fi"#;
 
 pub trait SshEventSink: Send + Sync {
@@ -99,6 +94,8 @@ struct SshInner {
     events: Arc<dyn SshEventSink>,
     sessions: RwLock<HashMap<String, Arc<SshSession>>>,
     transfers: RwLock<HashMap<String, Transfer>>,
+    download_cache_directory: PathBuf,
+    cached_downloads: RwLock<HashMap<String, CachedDownload>>,
 }
 
 struct SshSession {
@@ -108,7 +105,7 @@ struct SshSession {
     shell: Arc<ChannelWriteHalf<client::Msg>>,
     terminal: Mutex<TerminalBuffer>,
     sftp: Mutex<Option<Arc<SftpSession>>>,
-    upload_slots: Arc<Semaphore>,
+    transfer_slots: Arc<Semaphore>,
     closing: AtomicBool,
 }
 
@@ -299,6 +296,31 @@ pub struct UploadFile {
     pub local_path: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedDownload {
+    pub cache_id: String,
+    pub session_id: String,
+    pub remote_path: String,
+    pub file_name: String,
+    #[serde(skip_serializing)]
+    pub local_path: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedDownloadRelease {
+    pub released: bool,
+}
+
+#[derive(Clone, Debug)]
+struct DownloadCachePaths {
+    directory: PathBuf,
+    partial: PathBuf,
+    completed: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryListing {
@@ -314,6 +336,21 @@ pub struct DirectoryEntry {
     pub entry_type: String,
     pub size: u64,
     pub modified_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEntryRemoval {
+    pub path: String,
+    pub entry_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEntryRename {
+    pub source_path: String,
+    pub target_path: String,
+    pub entry_type: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -334,7 +371,6 @@ pub struct CompletionItem {
 #[derive(Debug)]
 struct RemoteCompletionSource {
     commands: Vec<String>,
-    history: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -377,18 +413,24 @@ pub struct TransferActivity {
 }
 
 impl SshManager {
-    pub fn new(app: AppHandle) -> Self {
-        Self::with_event_sink(Arc::new(TauriEventSink { app }))
+    pub fn new(app: AppHandle, download_cache_directory: PathBuf) -> AppResult<Self> {
+        Self::with_event_sink(Arc::new(TauriEventSink { app }), download_cache_directory)
     }
 
-    pub fn with_event_sink(events: Arc<dyn SshEventSink>) -> Self {
-        Self {
+    pub fn with_event_sink(
+        events: Arc<dyn SshEventSink>,
+        download_cache_directory: PathBuf,
+    ) -> AppResult<Self> {
+        prepare_download_cache_directory(&download_cache_directory)?;
+        Ok(Self {
             inner: Arc::new(SshInner {
                 events,
                 sessions: RwLock::new(HashMap::new()),
                 transfers: RwLock::new(HashMap::new()),
+                download_cache_directory,
+                cached_downloads: RwLock::new(HashMap::new()),
             }),
-        }
+        })
     }
 
     pub async fn inspect_host(&self, connection: &SshConnection) -> AppResult<HostKeyObservation> {
@@ -556,7 +598,7 @@ impl SshManager {
             shell: Arc::new(writer),
             terminal: Mutex::new(TerminalBuffer::default()),
             sftp: Mutex::new(None),
-            upload_slots: Arc::new(Semaphore::new(MAX_UPLOAD_CONCURRENCY)),
+            transfer_slots: Arc::new(Semaphore::new(MAX_TRANSFER_CONCURRENCY)),
             closing: AtomicBool::new(false),
         });
         self.inner
@@ -806,6 +848,243 @@ impl SshManager {
         })
     }
 
+    /// Removes exactly one remote entry after re-reading its type through
+    /// LSTAT. Directories must be empty; this path never performs recursion.
+    pub async fn remove_remote_entry(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        expected_entry_type: &str,
+    ) -> AppResult<RemoteEntryRemoval> {
+        let session = self.session(session_id).await?;
+        let path = normalize_remote_path(remote_path)?;
+        if path == "/" {
+            return Err(AppError::new(
+                "SFTP_DELETE_ROOT_REJECTED",
+                "不能删除远程根目录。",
+            ));
+        }
+        let expected_entry_type = validate_removable_entry_type(expected_entry_type)?;
+        let sftp = self.get_sftp(&session).await?;
+        let metadata = sftp
+            .symlink_metadata(path.clone())
+            .await
+            .map_err(|error| map_remote_delete_stat_error(&error))?;
+        let actual_entry_type = removable_entry_type(&metadata)?;
+        if actual_entry_type != expected_entry_type {
+            return Err(AppError::new(
+                "REMOTE_ENTRY_CHANGED",
+                "远程条目类型已经变化，请刷新目录并重新确认。",
+            ));
+        }
+
+        if actual_entry_type == "directory" {
+            let mut entries = sftp.read_dir(path.clone()).await.map_err(|_| {
+                AppError::new(
+                    "SFTP_DELETE_CHECK_FAILED",
+                    "无法确认远程目录是否为空，请检查权限后重试。",
+                )
+            })?;
+            if entries.any(|entry| !matches!(entry.file_name().as_str(), "." | "..")) {
+                return Err(AppError::new(
+                    "REMOTE_DIRECTORY_NOT_EMPTY",
+                    "远程目录不是空目录；为避免误删，客户端不会递归删除。",
+                ));
+            }
+            sftp.remove_dir(path.clone()).await.map_err(|_| {
+                AppError::new(
+                    "SFTP_DELETE_FAILED",
+                    "无法删除远程空目录，请检查权限或目录状态。",
+                )
+            })?;
+        } else {
+            sftp.remove_file(path.clone()).await.map_err(|error| {
+                if sftp_not_found(&error) {
+                    AppError::new("REMOTE_ENTRY_NOT_FOUND", "远程文件已经不存在，请刷新目录。")
+                } else {
+                    AppError::new("SFTP_DELETE_FAILED", "无法删除远程文件，请检查权限。")
+                }
+            })?;
+        }
+
+        Ok(RemoteEntryRemoval {
+            path,
+            entry_type: actual_entry_type.to_string(),
+        })
+    }
+
+    /// Renames or moves exactly one remote entry without replacing an
+    /// existing target. The source type is re-read through LSTAT before the
+    /// operation, and directory moves into their own subtree are rejected.
+    pub async fn rename_remote_entry(
+        &self,
+        session_id: &str,
+        source_path: &str,
+        target_path: &str,
+        expected_entry_type: &str,
+    ) -> AppResult<RemoteEntryRename> {
+        let session = self.session(session_id).await?;
+        let source = normalize_remote_path(source_path)?;
+        let target = normalize_remote_path(target_path)?;
+        validate_remote_rename_paths(&source, &target)?;
+        let expected_entry_type = validate_renamable_entry_type(expected_entry_type)?;
+        let sftp = self.get_sftp(&session).await?;
+
+        let source_metadata = sftp
+            .symlink_metadata(source.clone())
+            .await
+            .map_err(|error| map_remote_rename_source_stat_error(&error))?;
+        let actual_entry_type = renamable_entry_type(&source_metadata)?;
+        if actual_entry_type != expected_entry_type {
+            return Err(AppError::new(
+                "REMOTE_ENTRY_CHANGED",
+                "远程条目类型已经变化，请刷新目录并重新确认。",
+            ));
+        }
+        if actual_entry_type == "directory" && is_remote_descendant(&source, &target) {
+            return Err(AppError::new(
+                "REMOTE_DIRECTORY_SELF_MOVE",
+                "不能把远程目录移动到它自己的子目录中。",
+            ));
+        }
+
+        assert_remote_rename_target_missing(&sftp, &target).await?;
+        assert_remote_rename_parent_directory(&sftp, &target).await?;
+        sftp.rename(source.clone(), target.clone())
+            .await
+            .map_err(|error| {
+                if sftp_not_found(&error) {
+                    AppError::new(
+                        "REMOTE_ENTRY_NOT_FOUND",
+                        "远程源条目已经不存在，请刷新目录。",
+                    )
+                } else {
+                    AppError::new(
+                        "SFTP_RENAME_FAILED",
+                        "无法重命名或移动远程条目，请检查权限和目标状态。",
+                    )
+                }
+            })?;
+
+        Ok(RemoteEntryRename {
+            source_path: source,
+            target_path: target,
+            entry_type: actual_entry_type.to_string(),
+        })
+    }
+
+    /// Streams one regular remote file into an application-owned cache entry.
+    /// The cache entry is registered only after exact-size validation, an
+    /// on-disk sync, and a same-directory `.part` -> final atomic rename.
+    pub async fn download_to_cache(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+    ) -> AppResult<CachedDownload> {
+        let session = self.session(session_id).await?;
+        let remote_path = normalize_remote_path(remote_path)?;
+        let file_name = download_file_name(&remote_path)?;
+        let _permit = session
+            .transfer_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::new("TRANSFER_QUEUE_FAILED", "文件传输并发队列已经关闭。"))?;
+        let sftp = self.get_sftp(&session).await?;
+        let metadata = sftp
+            .symlink_metadata(remote_path.clone())
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    "SFTP_DOWNLOAD_STAT_FAILED",
+                    "无法读取远程文件信息，请检查路径和权限。",
+                )
+            })?;
+        let expected_size = validate_download_metadata(&metadata)?;
+        let mut remote_file = sftp.open(remote_path.clone()).await.map_err(|_| {
+            AppError::new(
+                "SFTP_DOWNLOAD_OPEN_FAILED",
+                "无法打开远程文件，请检查路径和权限。",
+            )
+        })?;
+        let opened_metadata = remote_file.metadata().await.map_err(|_| {
+            AppError::new(
+                "SFTP_DOWNLOAD_STAT_FAILED",
+                "远程文件已打开，但无法再次校验文件信息。",
+            )
+        })?;
+        let opened_size = validate_download_metadata(&opened_metadata)?;
+        if opened_size != expected_size {
+            return Err(AppError::new(
+                "REMOTE_FILE_CHANGED",
+                "下载开始前远程文件大小发生变化，任务已停止。",
+            ));
+        }
+
+        let (cache_id, cache_paths) =
+            create_download_cache_paths(&self.inner.download_cache_directory, &file_name).await?;
+        cache_download_reader(&mut remote_file, expected_size, &cache_paths).await?;
+        let local_path = windows_path_text(&cache_paths.completed)?;
+        let cached = CachedDownload {
+            cache_id: cache_id.clone(),
+            session_id: session.id.clone(),
+            remote_path,
+            file_name,
+            local_path,
+            size: expected_size,
+        };
+        self.inner
+            .cached_downloads
+            .write()
+            .await
+            .insert(cache_id, cached.clone());
+        Ok(cached)
+    }
+
+    pub async fn cached_download_for_drag(
+        &self,
+        cache_id: &str,
+    ) -> AppResult<(CachedDownload, PathBuf)> {
+        let id = validate_id(cache_id, "下载缓存标识")?;
+        let cached = self
+            .inner
+            .cached_downloads
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_NOT_FOUND",
+                    "下载缓存不存在或已经释放，请重新准备远程文件。",
+                )
+            })?;
+        let canonical_path =
+            validate_cached_download_for_drag(&self.inner.download_cache_directory, &cached)
+                .await?;
+        Ok((cached, canonical_path))
+    }
+
+    /// Releases only a cache entry returned by this process. Unknown IDs are
+    /// idempotent; no caller-provided filesystem path is ever deleted.
+    pub async fn release_cached_download(
+        &self,
+        cache_id: &str,
+    ) -> AppResult<CachedDownloadRelease> {
+        let id = validate_id(cache_id, "下载缓存标识")?;
+        let cached = self.inner.cached_downloads.write().await.remove(&id);
+        let Some(cached) = cached else {
+            return Ok(CachedDownloadRelease { released: false });
+        };
+        if let Err(error) =
+            release_cached_download_file(&self.inner.download_cache_directory, &cached).await
+        {
+            self.inner.cached_downloads.write().await.insert(id, cached);
+            return Err(error);
+        }
+        Ok(CachedDownloadRelease { released: true })
+    }
+
     pub async fn upload_files(
         &self,
         session_id: &str,
@@ -1023,18 +1302,8 @@ impl SshManager {
         }
     }
 
-    pub async fn active_transfers(&self) -> Vec<TransferSummary> {
-        let mut items = self
-            .inner
-            .transfers
-            .read()
-            .await
-            .values()
-            .filter(|transfer| transfer.state.is_active())
-            .map(TransferSummary::from)
-            .collect::<Vec<_>>();
-        items.sort_by(|left, right| left.id.cmp(&right.id));
-        items
+    pub async fn active_session_count(&self) -> usize {
+        self.inner.sessions.read().await.len()
     }
 
     pub async fn completion_catalog(&self, session_id: &str) -> AppResult<Vec<CompletionItem>> {
@@ -1230,7 +1499,7 @@ impl SshManager {
                 self.finish_cancelled(&transfer_id, &attempt_id, None).await?;
                 return Ok(());
             }
-            permit = session.upload_slots.clone().acquire_owned() => match permit {
+            permit = session.transfer_slots.clone().acquire_owned() => match permit {
                 Ok(permit) => permit,
                 Err(_) => {
                     self.fail_transfer(
@@ -1947,6 +2216,99 @@ fn validate_remote_entry_name(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_removable_entry_type(value: &str) -> AppResult<&str> {
+    if matches!(value, "file" | "directory" | "symlink") {
+        Ok(value)
+    } else {
+        Err(AppError::new(
+            "INVALID_INPUT",
+            "只能删除普通文件、符号链接或空目录。",
+        ))
+    }
+}
+
+fn validate_renamable_entry_type(value: &str) -> AppResult<&str> {
+    if matches!(value, "file" | "directory" | "symlink") {
+        Ok(value)
+    } else {
+        Err(AppError::new(
+            "INVALID_INPUT",
+            "只能重命名或移动普通文件、符号链接或目录。",
+        ))
+    }
+}
+
+fn removable_entry_type(metadata: &FileAttributes) -> AppResult<&'static str> {
+    match metadata.file_type() {
+        FileType::Dir => Ok("directory"),
+        FileType::File => Ok("file"),
+        FileType::Symlink => Ok("symlink"),
+        FileType::Other => Err(AppError::new(
+            "SFTP_DELETE_UNSUPPORTED_TYPE",
+            "该远程条目类型不支持删除。",
+        )),
+    }
+}
+
+fn renamable_entry_type(metadata: &FileAttributes) -> AppResult<&'static str> {
+    match metadata.file_type() {
+        FileType::Dir => Ok("directory"),
+        FileType::File => Ok("file"),
+        FileType::Symlink => Ok("symlink"),
+        FileType::Other => Err(AppError::new(
+            "SFTP_RENAME_UNSUPPORTED_TYPE",
+            "该远程条目类型不支持重命名或移动。",
+        )),
+    }
+}
+
+fn map_remote_delete_stat_error(error: &SftpError) -> AppError {
+    if sftp_not_found(error) {
+        AppError::new("REMOTE_ENTRY_NOT_FOUND", "远程条目已经不存在，请刷新目录。")
+    } else {
+        AppError::new(
+            "SFTP_DELETE_STAT_FAILED",
+            "无法读取远程条目状态，请检查路径和权限。",
+        )
+    }
+}
+
+fn validate_remote_rename_paths(source: &str, target: &str) -> AppResult<()> {
+    if source == "/" || target == "/" {
+        return Err(AppError::new(
+            "SFTP_RENAME_ROOT_REJECTED",
+            "不能重命名或移动远程根目录。",
+        ));
+    }
+    if source == target {
+        return Err(AppError::new(
+            "SFTP_RENAME_SAME_PATH",
+            "远程源路径和目标路径不能相同。",
+        ));
+    }
+    Ok(())
+}
+
+fn is_remote_descendant(source: &str, target: &str) -> bool {
+    target
+        .strip_prefix(source)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn map_remote_rename_source_stat_error(error: &SftpError) -> AppError {
+    if sftp_not_found(error) {
+        AppError::new(
+            "REMOTE_ENTRY_NOT_FOUND",
+            "远程源条目已经不存在，请刷新目录。",
+        )
+    } else {
+        AppError::new(
+            "SFTP_RENAME_SOURCE_STAT_FAILED",
+            "无法读取远程源条目状态，请检查路径和权限。",
+        )
+    }
+}
+
 fn contains_control(value: &str) -> bool {
     value.chars().any(|character| character.is_control())
 }
@@ -1965,6 +2327,464 @@ fn remote_parent(path: &str) -> &str {
         .unwrap_or("/")
 }
 
+fn prepare_download_cache_directory(directory: &Path) -> AppResult<()> {
+    if !directory.is_absolute() {
+        return Err(AppError::new(
+            "DOWNLOAD_CACHE_INVALID",
+            "下载缓存目录不是有效的 Windows 绝对路径。",
+        ));
+    }
+    fs::create_dir_all(directory).map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_CACHE_CREATE_FAILED",
+            "无法创建应用专用下载缓存目录。",
+        )
+    })?;
+    validate_download_cache_directory(directory)?;
+    if cleanup_stale_download_cache(directory).is_err() {
+        eprintln!("[remote-terminal] cleanup stale download cache: DOWNLOAD_CACHE_CLEANUP_FAILED");
+    }
+    Ok(())
+}
+
+fn validate_download_cache_directory(directory: &Path) -> AppResult<()> {
+    let metadata = fs::symlink_metadata(directory).map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_CACHE_UNAVAILABLE",
+            "应用专用下载缓存目录当前不可用。",
+        )
+    })?;
+    if !metadata.is_dir() || is_local_reparse_point(&metadata) {
+        return Err(AppError::new(
+            "DOWNLOAD_CACHE_INVALID",
+            "应用专用下载缓存目录不是普通本地目录。",
+        ));
+    }
+    Ok(())
+}
+
+/// Removes only UUID-named directories previously owned by this cache. Every
+/// child is checked as a regular non-reparse file and deleted individually;
+/// no recursive or caller-controlled deletion is used.
+fn cleanup_stale_download_cache(directory: &Path) -> AppResult<()> {
+    let entries = fs::read_dir(directory).map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+            "无法检查上次运行遗留的下载缓存。",
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                "无法检查上次运行遗留的下载缓存。",
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if Uuid::parse_str(name)
+            .ok()
+            .is_none_or(|id| id.to_string() != name.to_ascii_lowercase())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                "无法检查上次运行遗留的下载缓存。",
+            )
+        })?;
+        if !metadata.is_dir() || is_local_reparse_point(&metadata) {
+            continue;
+        }
+        let children = fs::read_dir(&path).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                "无法检查上次运行遗留的下载缓存。",
+            )
+        })?;
+        let mut removable = true;
+        for child in children {
+            let child = child.map_err(|_| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                    "无法检查上次运行遗留的下载缓存。",
+                )
+            })?;
+            let child_metadata = fs::symlink_metadata(child.path()).map_err(|_| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                    "无法检查上次运行遗留的下载缓存。",
+                )
+            })?;
+            if !child_metadata.is_file() || is_local_reparse_point(&child_metadata) {
+                removable = false;
+                continue;
+            }
+            fs::remove_file(child.path()).map_err(|_| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                    "无法清理上次运行遗留的下载缓存文件。",
+                )
+            })?;
+        }
+        if removable {
+            fs::remove_dir(&path).map_err(|_| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                    "无法清理上次运行遗留的下载缓存目录。",
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn download_file_name(remote_path: &str) -> AppResult<String> {
+    let name = remote_path
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                "SFTP_DOWNLOAD_INVALID",
+                "只能下载普通远程文件，不能下载根目录。",
+            )
+        })?;
+    validate_windows_download_file_name(name)?;
+    Ok(name.to_string())
+}
+
+fn validate_windows_download_file_name(value: &str) -> AppResult<()> {
+    let invalid_character = value.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+    });
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let stem_bytes = stem.as_bytes();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem_bytes.len() == 4
+            && matches!(&stem_bytes[..3], b"COM" | b"LPT")
+            && matches!(stem_bytes[3], b'1'..=b'9'));
+    if value.is_empty()
+        || value.encode_utf16().count() > MAX_WINDOWS_FILE_NAME_UTF16
+        || value.ends_with([' ', '.'])
+        || matches!(value, "." | "..")
+        || invalid_character
+        || reserved
+    {
+        return Err(AppError::new(
+            "SFTP_DOWNLOAD_UNSUPPORTED_NAME",
+            "远程文件名不能安全映射为 Windows 本地文件名。",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_download_metadata(metadata: &FileAttributes) -> AppResult<u64> {
+    if metadata.file_type() != FileType::File {
+        return Err(AppError::new(
+            "SFTP_DOWNLOAD_NOT_FILE",
+            "只能下载普通远程文件，目录、符号链接和设备文件暂不支持。",
+        ));
+    }
+    metadata.size.ok_or_else(|| {
+        AppError::new(
+            "SFTP_DOWNLOAD_SIZE_UNKNOWN",
+            "服务器没有返回可靠的远程文件大小，已拒绝下载。",
+        )
+    })
+}
+
+async fn create_download_cache_paths(
+    root: &Path,
+    file_name: &str,
+) -> AppResult<(String, DownloadCachePaths)> {
+    validate_download_cache_directory(root)?;
+    for _ in 0..8 {
+        let cache_id = Uuid::new_v4().to_string();
+        let directory = root.join(&cache_id);
+        let partial_name = format!(".remote-terminal-{cache_id}.part");
+        let partial = directory.join(partial_name);
+        let completed = directory.join(file_name);
+        windows_path_text(&partial)?;
+        windows_path_text(&completed)?;
+        match tokio::fs::create_dir(&directory).await {
+            Ok(()) => {
+                let metadata = tokio::fs::symlink_metadata(&directory).await.map_err(|_| {
+                    AppError::new("DOWNLOAD_CACHE_CREATE_FAILED", "无法验证本次下载缓存目录。")
+                })?;
+                if !metadata.is_dir() || is_local_reparse_point(&metadata) {
+                    return Err(AppError::new(
+                        "DOWNLOAD_CACHE_INVALID",
+                        "本次下载缓存目录不是普通本地目录。",
+                    ));
+                }
+                return Ok((
+                    cache_id,
+                    DownloadCachePaths {
+                        directory,
+                        partial,
+                        completed,
+                    },
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                return Err(AppError::new(
+                    "DOWNLOAD_CACHE_CREATE_FAILED",
+                    "无法创建本次下载缓存目录。",
+                ))
+            }
+        }
+    }
+    Err(AppError::new(
+        "DOWNLOAD_CACHE_CREATE_FAILED",
+        "无法分配唯一的下载缓存标识。",
+    ))
+}
+
+async fn cache_download_reader<R>(
+    reader: &mut R,
+    expected_size: u64,
+    paths: &DownloadCachePaths,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let result = write_download_cache(reader, expected_size, paths).await;
+    let Err(error) = result else {
+        return Ok(());
+    };
+    match cleanup_download_cache_paths(paths).await {
+        Ok(()) => Err(error),
+        Err(_) => Err(AppError::new(
+            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+            format!("{}；本地下载临时缓存清理失败。", error.message),
+        )),
+    }
+}
+
+async fn write_download_cache<R>(
+    reader: &mut R,
+    expected_size: u64,
+    paths: &DownloadCachePaths,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut local_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&paths.partial)
+        .await
+        .map_err(|_| AppError::new("DOWNLOAD_CACHE_WRITE_FAILED", "无法创建本地下载临时文件。"))?;
+    let mut buffer = vec![0_u8; DOWNLOAD_BUFFER_SIZE];
+    let mut transferred = 0_u64;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| AppError::new("SFTP_DOWNLOAD_READ_FAILED", "读取远程文件失败。"))?;
+        if read == 0 {
+            break;
+        }
+        transferred = transferred
+            .checked_add(read as u64)
+            .ok_or_else(|| AppError::new("SFTP_DOWNLOAD_SIZE_INVALID", "下载字节计数超出范围。"))?;
+        if transferred > expected_size {
+            return Err(AppError::new(
+                "REMOTE_FILE_CHANGED",
+                "下载期间远程文件大小发生变化，任务已停止。",
+            ));
+        }
+        local_file.write_all(&buffer[..read]).await.map_err(|_| {
+            AppError::new("DOWNLOAD_CACHE_WRITE_FAILED", "写入本地下载临时文件失败。")
+        })?;
+    }
+    if transferred != expected_size {
+        return Err(AppError::new(
+            "REMOTE_FILE_CHANGED",
+            "下载期间远程文件大小发生变化，任务已停止。",
+        ));
+    }
+    local_file
+        .flush()
+        .await
+        .map_err(|_| AppError::new("DOWNLOAD_CACHE_WRITE_FAILED", "刷新本地下载临时文件失败。"))?;
+    local_file
+        .sync_all()
+        .await
+        .map_err(|_| AppError::new("DOWNLOAD_CACHE_WRITE_FAILED", "同步本地下载临时文件失败。"))?;
+    drop(local_file);
+    validate_local_cached_file(&paths.partial, expected_size).await?;
+    tokio::fs::rename(&paths.partial, &paths.completed)
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_CACHE_RENAME_FAILED",
+                "远程文件已下载，但无法完成本地原子重命名。",
+            )
+        })?;
+    validate_local_cached_file(&paths.completed, expected_size).await
+}
+
+async fn validate_local_cached_file(path: &Path, expected_size: u64) -> AppResult<()> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| AppError::new("DOWNLOAD_CACHE_VERIFY_FAILED", "无法校验本地下载缓存文件。"))?;
+    if !metadata.is_file() || is_local_reparse_point(&metadata) || metadata.len() != expected_size {
+        return Err(AppError::new(
+            "DOWNLOAD_CACHE_VERIFY_FAILED",
+            "本地下载缓存文件校验失败。",
+        ));
+    }
+    Ok(())
+}
+
+async fn cleanup_download_cache_paths(paths: &DownloadCachePaths) -> AppResult<()> {
+    remove_managed_cache_file(&paths.partial).await?;
+    remove_managed_cache_file(&paths.completed).await?;
+    match tokio::fs::remove_dir(&paths.directory).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AppError::new(
+            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+            "无法清理本次下载缓存目录。",
+        )),
+    }
+}
+
+async fn validate_cached_download_for_drag(
+    root: &Path,
+    cached: &CachedDownload,
+) -> AppResult<PathBuf> {
+    validate_download_cache_directory(root)?;
+    let (directory, completed) = cached_download_paths(root, cached)?;
+    let directory_metadata = tokio::fs::symlink_metadata(&directory).await.map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_CACHE_NOT_FOUND",
+            "下载缓存不存在或已经释放，请重新准备远程文件。",
+        )
+    })?;
+    if !directory_metadata.is_dir() || is_local_reparse_point(&directory_metadata) {
+        return Err(AppError::new(
+            "DOWNLOAD_CACHE_STATE_INVALID",
+            "下载缓存目录已被替换，已拒绝启动系统拖放。",
+        ));
+    }
+    validate_local_cached_file(&completed, cached.size).await?;
+
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|_| invalid_cached_download_state())?;
+    let canonical_directory = tokio::fs::canonicalize(&directory)
+        .await
+        .map_err(|_| invalid_cached_download_state())?;
+    let canonical_completed = tokio::fs::canonicalize(&completed)
+        .await
+        .map_err(|_| invalid_cached_download_state())?;
+    if canonical_directory.parent() != Some(canonical_root.as_path())
+        || canonical_completed.parent() != Some(canonical_directory.as_path())
+        || !canonical_completed.starts_with(&canonical_root)
+    {
+        return Err(invalid_cached_download_state());
+    }
+    Ok(canonical_completed)
+}
+
+fn cached_download_paths(root: &Path, cached: &CachedDownload) -> AppResult<(PathBuf, PathBuf)> {
+    let id = Uuid::parse_str(&cached.cache_id).map_err(|_| invalid_cached_download_state())?;
+    if id.to_string() != cached.cache_id.to_ascii_lowercase() {
+        return Err(invalid_cached_download_state());
+    }
+    validate_windows_download_file_name(&cached.file_name)
+        .map_err(|_| invalid_cached_download_state())?;
+    let directory = root.join(&cached.cache_id);
+    let completed = directory.join(&cached.file_name);
+    if Path::new(&cached.local_path) != completed {
+        return Err(invalid_cached_download_state());
+    }
+    Ok((directory, completed))
+}
+
+fn invalid_cached_download_state() -> AppError {
+    AppError::new(
+        "DOWNLOAD_CACHE_STATE_INVALID",
+        "下载缓存状态与应用专用目录不一致，已拒绝操作。",
+    )
+}
+
+async fn release_cached_download_file(root: &Path, cached: &CachedDownload) -> AppResult<()> {
+    validate_download_cache_directory(root)?;
+    let (directory, completed) = cached_download_paths(root, cached)?;
+    match tokio::fs::symlink_metadata(&directory).await {
+        Ok(metadata) if metadata.is_dir() && !is_local_reparse_point(&metadata) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => {
+            return Err(AppError::new(
+                "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                "下载缓存目录已被替换，已拒绝清理。",
+            ))
+        }
+    }
+    remove_managed_cache_file(&completed).await?;
+    tokio::fs::remove_dir(&directory).await.map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+            "无法释放已完成的下载缓存目录。",
+        )
+    })
+}
+
+async fn remove_managed_cache_file(path: &Path) -> AppResult<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() && !is_local_reparse_point(&metadata) => {
+            tokio::fs::remove_file(path).await.map_err(|_| {
+                AppError::new(
+                    "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                    "无法删除应用专用下载缓存文件。",
+                )
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(AppError::new(
+            "DOWNLOAD_CACHE_CLEANUP_FAILED",
+            "下载缓存文件已被替换，已拒绝清理。",
+        )),
+    }
+}
+
+fn windows_path_text(path: &Path) -> AppResult<String> {
+    let value = path.to_str().ok_or_else(|| {
+        AppError::new(
+            "DOWNLOAD_CACHE_INVALID",
+            "下载缓存路径不是有效的 Unicode Windows 路径。",
+        )
+    })?;
+    if !path.is_absolute() || value.encode_utf16().count() > 32_767 {
+        return Err(AppError::new(
+            "DOWNLOAD_CACHE_INVALID",
+            "下载缓存路径超过 Windows 安全长度限制。",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn is_local_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
 async fn assert_remote_target_available(sftp: &SftpSession, target: &str) -> AppResult<()> {
     match sftp.try_exists(target.to_string()).await {
         Ok(false) => Ok(()),
@@ -1980,6 +2800,47 @@ async fn assert_remote_target_available(sftp: &SftpSession, target: &str) -> App
             "无法检查远程目标是否已存在。",
         )),
     }
+}
+
+async fn assert_remote_rename_target_missing(sftp: &SftpSession, target: &str) -> AppResult<()> {
+    match sftp.symlink_metadata(target.to_string()).await {
+        Ok(_) => Err(AppError::new(
+            "REMOTE_TARGET_EXISTS",
+            "远程目标已经存在；为避免覆盖，操作已取消。",
+        )),
+        Err(error) if sftp_not_found(&error) => Ok(()),
+        Err(_) => Err(AppError::new(
+            "SFTP_RENAME_TARGET_STAT_FAILED",
+            "无法确认远程目标是否存在，请检查路径和权限。",
+        )),
+    }
+}
+
+async fn assert_remote_rename_parent_directory(sftp: &SftpSession, target: &str) -> AppResult<()> {
+    let parent = remote_parent(target);
+    let metadata = sftp
+        .symlink_metadata(parent.to_string())
+        .await
+        .map_err(|error| {
+            if sftp_not_found(&error) {
+                AppError::new(
+                    "REMOTE_TARGET_PARENT_NOT_FOUND",
+                    "远程目标的上级目录不存在，请刷新后重试。",
+                )
+            } else {
+                AppError::new(
+                    "SFTP_RENAME_PARENT_STAT_FAILED",
+                    "无法读取远程目标上级目录状态，请检查路径和权限。",
+                )
+            }
+        })?;
+    if metadata.file_type() != FileType::Dir {
+        return Err(AppError::new(
+            "REMOTE_TARGET_PARENT_NOT_DIRECTORY",
+            "远程目标的上级路径不是目录。",
+        ));
+    }
+    Ok(())
 }
 
 fn sftp_not_found(error: &SftpError) -> bool {
@@ -2025,31 +2886,23 @@ fn parse_completion_output(text: &str) -> AppResult<RemoteCompletionSource> {
     enum Section {
         Before,
         Commands,
-        History,
     }
     let mut section = Section::Before;
     let mut saw_commands = false;
-    let mut saw_history = false;
     let mut command_names = HashSet::new();
     let mut commands = Vec::new();
-    let mut history_commands = HashSet::new();
-    let mut history = Vec::new();
 
     for raw_line in text.lines() {
         let line = raw_line.trim_end_matches('\r');
         match line {
-            COMMANDS_MARKER if !saw_commands && !saw_history => {
+            COMMANDS_MARKER if !saw_commands => {
                 saw_commands = true;
                 section = Section::Commands;
             }
-            HISTORY_MARKER if saw_commands && !saw_history => {
-                saw_history = true;
-                section = Section::History;
-            }
-            COMMANDS_MARKER | HISTORY_MARKER => {
+            COMMANDS_MARKER => {
                 return Err(AppError::new(
                     "COMPLETION_CATALOG_INVALID",
-                    "远程补全目录包含重复或乱序的分区标记。",
+                    "远程补全目录包含重复的分区标记。",
                 ))
             }
             _ => match section {
@@ -2072,29 +2925,16 @@ fn parse_completion_output(text: &str) -> AppResult<RemoteCompletionSource> {
                         commands.push(line.to_string());
                     }
                 }
-                Section::History => {
-                    if let Some(command) = normalize_history_line(line) {
-                        if history_commands.insert(command.clone()) {
-                            if history.len() >= MAX_COMPLETION_HISTORY {
-                                return Err(AppError::new(
-                                    "COMPLETION_CATALOG_LIMIT",
-                                    "远程历史命令数量超过 400 条安全上限。",
-                                ));
-                            }
-                            history.push(command);
-                        }
-                    }
-                }
             },
         }
     }
-    if !saw_commands || !saw_history {
+    if !saw_commands {
         return Err(AppError::new(
             "COMPLETION_CATALOG_INVALID",
-            "远程补全目录缺少必要的分区标记。",
+            "远程补全目录缺少命令分区标记。",
         ));
     }
-    Ok(RemoteCompletionSource { commands, history })
+    Ok(RemoteCompletionSource { commands })
 }
 
 fn is_command_name(value: &str) -> bool {
@@ -2106,47 +2946,15 @@ fn is_command_name(value: &str) -> bool {
         && !value.contains('\\')
 }
 
-fn normalize_history_line(line: &str) -> Option<String> {
-    if line.trim().is_empty() || contains_control(line) {
-        return None;
-    }
-    if line.strip_prefix('#').is_some_and(|timestamp| {
-        !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
-    }) {
-        return None;
-    }
-    let command = if line.starts_with(": ") {
-        let (_, command) = line.split_once(';')?;
-        command
-    } else {
-        line
-    };
-    if command.trim().is_empty() || command.len() > 4096 || contains_control(command) {
-        None
-    } else {
-        Some(command.to_string())
-    }
-}
-
 fn build_completion_items(source: RemoteCompletionSource) -> Vec<CompletionItem> {
-    let mut seen = HashSet::new();
-    let mut items = Vec::with_capacity(source.commands.len() + source.history.len());
-    for command in source.commands {
-        seen.insert(command.clone());
-        items.push(CompletionItem {
+    source
+        .commands
+        .into_iter()
+        .map(|command| CompletionItem {
             command,
             source: "remote-command".to_string(),
-        });
-    }
-    for command in source.history.into_iter().rev() {
-        if seen.insert(command.clone()) {
-            items.push(CompletionItem {
-                command,
-                source: "history".to_string(),
-            });
-        }
-    }
-    items
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2159,6 +2967,16 @@ mod tests {
         fn emit(&self, _event: &str, _payload: Value) -> AppResult<()> {
             Ok(())
         }
+    }
+
+    fn test_manager() -> (tempfile::TempDir, SshManager) {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = SshManager::with_event_sink(
+            Arc::new(NoopEventSink),
+            directory.path().join("download-cache"),
+        )
+        .unwrap();
+        (directory, manager)
     }
 
     fn test_transfer(state: TransferState) -> Transfer {
@@ -2219,6 +3037,166 @@ mod tests {
             validate_remote_entry_name("unsafe\nname").unwrap_err().code,
             "SFTP_LIST_INVALID"
         );
+    }
+
+    #[test]
+    fn remote_delete_accepts_only_explicit_safe_entry_types() {
+        assert_eq!(validate_removable_entry_type("file").unwrap(), "file");
+        assert_eq!(
+            validate_removable_entry_type("directory").unwrap(),
+            "directory"
+        );
+        assert_eq!(
+            validate_removable_entry_type("other").unwrap_err().code,
+            "INVALID_INPUT"
+        );
+
+        let mut directory = FileAttributes::empty();
+        directory.set_dir(true);
+        assert_eq!(removable_entry_type(&directory).unwrap(), "directory");
+        let mut symlink = FileAttributes::empty();
+        symlink.set_symlink(true);
+        assert_eq!(removable_entry_type(&symlink).unwrap(), "symlink");
+    }
+
+    #[test]
+    fn remote_rename_rejects_root_same_path_and_directory_self_moves() {
+        assert_eq!(
+            validate_remote_rename_paths("/", "/home/root")
+                .unwrap_err()
+                .code,
+            "SFTP_RENAME_ROOT_REJECTED"
+        );
+        assert_eq!(
+            validate_remote_rename_paths("/home/root/file", "/home/root/file")
+                .unwrap_err()
+                .code,
+            "SFTP_RENAME_SAME_PATH"
+        );
+        assert!(is_remote_descendant(
+            "/home/root/releases",
+            "/home/root/releases/archive"
+        ));
+        assert!(!is_remote_descendant(
+            "/home/root/releases",
+            "/home/root/releases-old"
+        ));
+        assert_eq!(validate_renamable_entry_type("file").unwrap(), "file");
+        assert_eq!(
+            validate_renamable_entry_type("other").unwrap_err().code,
+            "INVALID_INPUT"
+        );
+    }
+
+    #[test]
+    fn download_cache_requires_windows_safe_file_names_and_reliable_metadata() {
+        assert_eq!(download_file_name("/var/log/app.log").unwrap(), "app.log");
+        assert_eq!(download_file_name("/var/log/abé").unwrap(), "abé");
+        for path in [
+            "/var/log/CON",
+            "/var/log/com1.txt",
+            "/var/log/trailing.",
+            "/var/log/unsafe?.txt",
+        ] {
+            assert_eq!(
+                download_file_name(path).unwrap_err().code,
+                "SFTP_DOWNLOAD_UNSUPPORTED_NAME"
+            );
+        }
+        assert_eq!(
+            download_file_name("/").unwrap_err().code,
+            "SFTP_DOWNLOAD_INVALID"
+        );
+
+        let mut regular = FileAttributes::empty();
+        regular.set_regular(true);
+        regular.size = Some(42);
+        assert_eq!(validate_download_metadata(&regular).unwrap(), 42);
+        regular.size = None;
+        assert_eq!(
+            validate_download_metadata(&regular).unwrap_err().code,
+            "SFTP_DOWNLOAD_SIZE_UNKNOWN"
+        );
+        let mut symlink = FileAttributes::empty();
+        symlink.set_symlink(true);
+        symlink.size = Some(42);
+        assert_eq!(
+            validate_download_metadata(&symlink).unwrap_err().code,
+            "SFTP_DOWNLOAD_NOT_FILE"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_cache_commits_exact_bytes_then_releases_only_its_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("download-cache");
+        prepare_download_cache_directory(&cache_root).unwrap();
+        let bytes = b"streamed remote bytes";
+        let (cache_id, paths) = create_download_cache_paths(&cache_root, "app.log")
+            .await
+            .unwrap();
+        let mut reader = bytes.as_slice();
+
+        cache_download_reader(&mut reader, bytes.len() as u64, &paths)
+            .await
+            .unwrap();
+
+        assert!(!paths.partial.exists());
+        assert_eq!(fs::read(&paths.completed).unwrap(), bytes);
+        let cached = CachedDownload {
+            cache_id,
+            session_id: Uuid::new_v4().to_string(),
+            remote_path: "/var/log/app.log".to_string(),
+            file_name: "app.log".to_string(),
+            local_path: windows_path_text(&paths.completed).unwrap(),
+            size: bytes.len() as u64,
+        };
+        assert!(
+            serde_json::to_value(&cached)
+                .unwrap()
+                .get("localPath")
+                .is_none(),
+            "WebView must not receive the Rust-owned cache path"
+        );
+        assert_eq!(
+            validate_cached_download_for_drag(&cache_root, &cached)
+                .await
+                .unwrap(),
+            tokio::fs::canonicalize(&paths.completed).await.unwrap()
+        );
+        let mut tampered = cached.clone();
+        tampered.local_path = root.path().join("outside.log").display().to_string();
+        assert_eq!(
+            validate_cached_download_for_drag(&cache_root, &tampered)
+                .await
+                .unwrap_err()
+                .code,
+            "DOWNLOAD_CACHE_STATE_INVALID"
+        );
+        release_cached_download_file(&cache_root, &cached)
+            .await
+            .unwrap();
+        assert!(!paths.directory.exists());
+    }
+
+    #[tokio::test]
+    async fn download_cache_size_mismatch_removes_part_and_job_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("download-cache");
+        prepare_download_cache_directory(&cache_root).unwrap();
+        let (_cache_id, paths) = create_download_cache_paths(&cache_root, "changed.bin")
+            .await
+            .unwrap();
+        let mut reader = b"too many bytes".as_slice();
+
+        let error = cache_download_reader(&mut reader, 3, &paths)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "REMOTE_FILE_CHANGED");
+        assert!(!paths.partial.exists());
+        assert!(!paths.completed.exists());
+        assert!(!paths.directory.exists());
     }
 
     #[test]
@@ -2290,7 +3268,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_cancellation_cannot_transition_to_finalizing() {
-        let manager = SshManager::with_event_sink(Arc::new(NoopEventSink));
+        let (_directory, manager) = test_manager();
         let transfer = test_transfer(TransferState::Uploading);
         let transfer_id = transfer.id.clone();
         let attempt_id = transfer.attempt_id.clone();
@@ -2319,7 +3297,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalizing_transition_makes_later_cancellation_explicitly_fail() {
-        let manager = SshManager::with_event_sink(Arc::new(NoopEventSink));
+        let (_directory, manager) = test_manager();
         let transfer = test_transfer(TransferState::Uploading);
         let transfer_id = transfer.id.clone();
         let attempt_id = transfer.attempt_id.clone();
@@ -2353,16 +3331,22 @@ mod tests {
     }
 
     #[test]
-    fn completion_parser_preserves_valid_commands_and_complete_history() {
+    fn completion_script_never_reads_remote_shell_history() {
+        let command = COMPLETION_CATALOG_COMMAND.to_ascii_lowercase();
+        assert!(command.contains("compgen -c"));
+        assert!(command.contains(&COMMANDS_MARKER.to_ascii_lowercase()));
+        assert!(!command.contains("history"));
+        assert!(!command.contains(".bash_history"));
+        assert!(!command.contains(".zsh_history"));
+    }
+
+    #[test]
+    fn completion_parser_preserves_only_valid_remote_commands() {
         let source = parse_completion_output(&format!(
-            "{COMMANDS_MARKER}\nls\ndf\nls\ncat\ninvalid command\n{HISTORY_MARKER}\n#1710000000\nls -lah /var/log\n: 1710000001:0;printf 'a b'\nls\n"
+            "{COMMANDS_MARKER}\nls\ndf\nls\ncat\ninvalid command\nls -lah /var/log\n"
         ))
         .unwrap();
         assert_eq!(source.commands, vec!["ls", "df", "cat"]);
-        assert_eq!(
-            source.history,
-            vec!["ls -lah /var/log", "printf 'a b'", "ls"]
-        );
 
         let items = build_completion_items(source);
         assert_eq!(
@@ -2380,26 +3364,25 @@ mod tests {
                     command: "cat".to_string(),
                     source: "remote-command".to_string(),
                 },
-                CompletionItem {
-                    command: "printf 'a b'".to_string(),
-                    source: "history".to_string(),
-                },
-                CompletionItem {
-                    command: "ls -lah /var/log".to_string(),
-                    source: "history".to_string(),
-                },
             ]
         );
+        assert!(items.iter().all(|item| item.source == "remote-command"));
     }
 
     #[test]
-    fn completion_parser_rejects_missing_or_reordered_markers() {
+    fn completion_parser_rejects_missing_preamble_or_duplicate_marker() {
         assert_eq!(
             parse_completion_output("ls\n").unwrap_err().code,
             "COMPLETION_CATALOG_INVALID"
         );
         assert_eq!(
-            parse_completion_output(&format!("{HISTORY_MARKER}\n{COMMANDS_MARKER}\nls\n"))
+            parse_completion_output(&format!("unexpected\n{COMMANDS_MARKER}\nls\n"))
+                .unwrap_err()
+                .code,
+            "COMPLETION_CATALOG_INVALID"
+        );
+        assert_eq!(
+            parse_completion_output(&format!("{COMMANDS_MARKER}\nls\n{COMMANDS_MARKER}\ndf\n"))
                 .unwrap_err()
                 .code,
             "COMPLETION_CATALOG_INVALID"
@@ -2412,30 +3395,9 @@ mod tests {
         for index in 0..=MAX_COMPLETION_COMMANDS {
             output.push_str(&format!("command{index}\n"));
         }
-        output.push_str(&format!("{HISTORY_MARKER}\n"));
         assert_eq!(
             parse_completion_output(&output).unwrap_err().code,
             "COMPLETION_CATALOG_LIMIT"
-        );
-
-        let mut output = format!("{COMMANDS_MARKER}\nls\n{HISTORY_MARKER}\n");
-        for index in 0..=MAX_COMPLETION_HISTORY {
-            output.push_str(&format!("history {index}\n"));
-        }
-        assert_eq!(
-            parse_completion_output(&output).unwrap_err().code,
-            "COMPLETION_CATALOG_LIMIT"
-        );
-    }
-
-    #[test]
-    fn completion_history_rejects_empty_control_and_oversized_entries() {
-        assert_eq!(normalize_history_line("  "), None);
-        assert_eq!(normalize_history_line("echo\tunsafe"), None);
-        assert_eq!(normalize_history_line(&"x".repeat(4097)), None);
-        assert_eq!(
-            normalize_history_line(": 1710000001:0;printf 'a b'"),
-            Some("printf 'a b'".to_string())
         );
     }
 }

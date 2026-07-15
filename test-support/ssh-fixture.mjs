@@ -9,9 +9,9 @@ const { Server, utils } = ssh2;
 
 const HOME = "/home/root";
 const UPLOAD_DIRECTORY = `${HOME}/releases`;
+const ARCHIVE_DIRECTORY = `${UPLOAD_DIRECTORY}/archive`;
 const NETWORK_MARKER = "@@REMOTE_TERMINAL:NETWORK_DEV@@";
 const COMMANDS_MARKER = "@@REMOTE_TERMINAL:COMMANDS@@";
-const HISTORY_MARKER = "@@REMOTE_TERMINAL:HISTORY@@";
 const SFTP_AUDIT_COMMAND = "__REMOTE_TERMINAL_FIXTURE_SFTP_AUDIT__";
 const MONITOR_SECTION_MARKERS = Object.freeze({
   os: "@@REMOTE_TERMINAL:OS@@",
@@ -71,9 +71,6 @@ function createCompletionCatalog() {
     "ll",
     "cat",
     "journalctl",
-    HISTORY_MARKER,
-    "ls -lah /var/log",
-    "journalctl -u remote-terminal",
   ].join("\n");
 }
 
@@ -100,7 +97,14 @@ function directoryStats() {
 }
 
 function createMemorySftp() {
-  const directories = new Set(["/", "/home", HOME, UPLOAD_DIRECTORY, `${UPLOAD_DIRECTORY}/logs`]);
+  const directories = new Set([
+    "/",
+    "/home",
+    HOME,
+    UPLOAD_DIRECTORY,
+    ARCHIVE_DIRECTORY,
+    `${UPLOAD_DIRECTORY}/logs`,
+  ]);
   const files = new Map([[`${UPLOAD_DIRECTORY}/readme.txt`, Buffer.from("fixture\n")]]);
   const handles = new Map();
   const audit = [];
@@ -151,6 +155,28 @@ function createMemorySftp() {
       });
     }
     return entries.sort((left, right) => left.filename.localeCompare(right.filename));
+  }
+
+  function moveEntry(oldPath, newPath) {
+    const content = files.get(oldPath);
+    if (content) {
+      files.delete(oldPath);
+      files.set(newPath, content);
+      return "file";
+    }
+
+    const prefix = `${oldPath}/`;
+    const directoryMoves = [...directories]
+      .filter((item) => item === oldPath || item.startsWith(prefix))
+      .map((item) => [item, `${newPath}${item.slice(oldPath.length)}`]);
+    const fileMoves = [...files.entries()]
+      .filter(([item]) => item.startsWith(prefix))
+      .map(([item, value]) => [item, `${newPath}${item.slice(oldPath.length)}`, value]);
+    for (const [source] of directoryMoves) directories.delete(source);
+    for (const [source] of fileMoves) files.delete(source);
+    for (const [, target] of directoryMoves) directories.add(target);
+    for (const [, target, value] of fileMoves) files.set(target, value);
+    return "directory";
   }
 
   function attach(sftp) {
@@ -264,11 +290,16 @@ function createMemorySftp() {
     sftp.on("RENAME", (id, rawOldPath, rawNewPath) => {
       const oldPath = normalize(rawOldPath);
       const newPath = normalize(rawNewPath);
-      const content = files.get(oldPath);
-      const validSource = path.posix.dirname(oldPath) === UPLOAD_DIRECTORY
-        && path.posix.basename(oldPath).endsWith(".part");
-      const validTarget = path.posix.dirname(newPath) === UPLOAD_DIRECTORY;
-      if (!content || !validSource || !validTarget) {
+      const isAtomicUpload = files.has(oldPath)
+        && path.posix.dirname(oldPath) === UPLOAD_DIRECTORY
+        && path.posix.basename(oldPath).endsWith(".part")
+        && path.posix.dirname(newPath) === UPLOAD_DIRECTORY;
+      const protectedDirectory = ["/", "/home", HOME, UPLOAD_DIRECTORY].includes(oldPath);
+      const movesIntoSelf = directories.has(oldPath) && newPath.startsWith(`${oldPath}/`);
+      if (!exists(oldPath)
+        || protectedDirectory
+        || movesIntoSelf
+        || !directories.has(path.posix.dirname(newPath))) {
         reject(sftp, id, STATUS_CODE.PERMISSION_DENIED);
         return;
       }
@@ -277,23 +308,46 @@ function createMemorySftp() {
         reject(sftp, id, STATUS_CODE.FAILURE);
         return;
       }
-      files.delete(oldPath);
-      files.set(newPath, content);
-      audit.push({
-        op: "atomicRename",
-        name: path.posix.basename(newPath),
-        bytes: content.length,
-      });
+      const entryType = moveEntry(oldPath, newPath);
+      if (isAtomicUpload) {
+        audit.push({
+          op: "atomicRename",
+          name: path.posix.basename(newPath),
+          bytes: files.get(newPath).length,
+        });
+      } else {
+        audit.push({
+          op: "rename",
+          type: entryType,
+          source: oldPath,
+          target: newPath,
+        });
+      }
       sftp.status(id, STATUS_CODE.OK);
     });
 
     sftp.on("REMOVE", (id, rawPath) => {
       const remotePath = normalize(rawPath);
-      if (!path.posix.basename(remotePath).endsWith(".part") || !files.delete(remotePath)) {
+      const temporary = path.posix.basename(remotePath).endsWith(".part");
+      if (!files.delete(remotePath)) {
         reject(sftp, id, STATUS_CODE.NO_SUCH_FILE);
         return;
       }
-      audit.push({ op: "removeTemporary" });
+      audit.push({ op: temporary ? "removeTemporary" : "removeFile", name: path.posix.basename(remotePath) });
+      sftp.status(id, STATUS_CODE.OK);
+    });
+
+    sftp.on("RMDIR", (id, rawPath) => {
+      const remotePath = normalize(rawPath);
+      const hasChildren = [...directories, ...files.keys()]
+        .some((item) => item !== remotePath && path.posix.dirname(item) === remotePath);
+      if (remotePath === "/" || remotePath === HOME || remotePath === UPLOAD_DIRECTORY
+        || !directories.has(remotePath) || hasChildren) {
+        reject(sftp, id, STATUS_CODE.FAILURE);
+        return;
+      }
+      directories.delete(remotePath);
+      audit.push({ op: "removeDirectory", name: path.posix.basename(remotePath) });
       sftp.status(id, STATUS_CODE.OK);
     });
   }
@@ -349,7 +403,7 @@ export function startSshServer({ enableSftp = false } = {}) {
             monitorCounterSample += 1;
           } else if (info.command.includes(MONITOR_SECTION_MARKERS.mounts)) {
             output = createMonitorSnapshot();
-          } else if (info.command.includes(COMMANDS_MARKER) && info.command.includes(HISTORY_MARKER)) {
+          } else if (info.command.includes(COMMANDS_MARKER)) {
             output = createCompletionCatalog();
           } else {
             stream.stderr.write("unsupported fixture command\n");

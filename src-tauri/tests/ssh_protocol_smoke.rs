@@ -146,7 +146,10 @@ fn real_ssh_sftp_protocol_smoke() {
 
     runtime.block_on(async move {
         let sink = Arc::new(RecordingSink::default());
-        let manager = SshManager::with_event_sink(sink.clone());
+        let download_cache = tempfile::tempdir().expect("isolated download cache");
+        let manager =
+            SshManager::with_event_sink(sink.clone(), download_cache.path().join("download-cache"))
+                .expect("download cache initialization");
         let connection = fixture_connection(port);
         let dimensions = TerminalDimensions {
             cols: 100,
@@ -229,9 +232,12 @@ fn real_ssh_sftp_protocol_smoke() {
         assert!(completion
             .iter()
             .any(|item| { item.command == "ls" && item.source == "remote-command" }));
-        assert!(completion.iter().any(|item| {
-            item.command == "journalctl -u remote-terminal" && item.source == "history"
-        }));
+        assert!(completion
+            .iter()
+            .all(|item| item.source == "remote-command"));
+        assert!(!completion
+            .iter()
+            .any(|item| item.command == "journalctl -u remote-terminal"));
 
         let previous = manager
             .exec(&connected.session_id, monitor::COUNTER_COMMAND)
@@ -325,6 +331,95 @@ fn real_ssh_sftp_protocol_smoke() {
             .expect_err("an existing remote target must not be overwritten");
         assert_eq!(overwrite.code, "REMOTE_FILE_EXISTS");
 
+        let renamed_file = manager
+            .rename_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/protocol-smoke.bin",
+                "/home/root/releases/protocol-renamed.bin",
+                "file",
+            )
+            .await
+            .expect("rename one real remote file");
+        assert_eq!(
+            renamed_file.source_path,
+            "/home/root/releases/protocol-smoke.bin"
+        );
+        assert_eq!(
+            renamed_file.target_path,
+            "/home/root/releases/protocol-renamed.bin"
+        );
+        assert_eq!(renamed_file.entry_type, "file");
+
+        let overwrite_by_rename = manager
+            .rename_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/protocol-renamed.bin",
+                "/home/root/releases/readme.txt",
+                "file",
+            )
+            .await
+            .expect_err("rename must not replace an existing remote target");
+        assert_eq!(overwrite_by_rename.code, "REMOTE_TARGET_EXISTS");
+
+        let moved_file = manager
+            .rename_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/protocol-renamed.bin",
+                "/home/root/releases/archive/protocol-renamed.bin",
+                "file",
+            )
+            .await
+            .expect("move one real remote file across directories");
+        assert_eq!(
+            moved_file.target_path,
+            "/home/root/releases/archive/protocol-renamed.bin"
+        );
+
+        let self_move = manager
+            .rename_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/archive",
+                "/home/root/releases/archive/nested",
+                "directory",
+            )
+            .await
+            .expect_err("a directory must not move into its own subtree");
+        assert_eq!(self_move.code, "REMOTE_DIRECTORY_SELF_MOVE");
+
+        let non_empty = manager
+            .remove_remote_entry(&connected.session_id, "/home/root/releases", "directory")
+            .await
+            .expect_err("non-empty directories must not be deleted recursively");
+        assert_eq!(non_empty.code, "REMOTE_DIRECTORY_NOT_EMPTY");
+
+        let removed_file = manager
+            .remove_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/archive/protocol-renamed.bin",
+                "file",
+            )
+            .await
+            .expect("delete one real remote file");
+        assert_eq!(removed_file.entry_type, "file");
+        let removed_directory = manager
+            .remove_remote_entry(
+                &connected.session_id,
+                "/home/root/releases/logs",
+                "directory",
+            )
+            .await
+            .expect("delete one empty remote directory");
+        assert_eq!(removed_directory.entry_type, "directory");
+
+        let after_delete = manager
+            .list_directory(&connected.session_id, "/home/root/releases")
+            .await
+            .expect("listing after real deletion");
+        assert!(!after_delete
+            .entries
+            .iter()
+            .any(|entry| entry.name == "protocol-smoke.bin" || entry.name == "logs"));
+
         let audit = manager
             .exec(&connected.session_id, SFTP_AUDIT_COMMAND)
             .await
@@ -357,10 +452,29 @@ fn real_ssh_sftp_protocol_smoke() {
             .and_then(Value::as_array)
             .expect("fixture uploaded files")
             .iter()
-            .any(|file| {
-                file.get("name").and_then(Value::as_str) == Some("protocol-smoke.bin")
-                    && file.get("bytes").and_then(Value::as_u64) == Some(upload_bytes.len() as u64)
-            }));
+            .any(|file| { file.get("name").and_then(Value::as_str) == Some("readme.txt") }));
+        assert!(operations.iter().any(|operation| {
+            operation.get("op").and_then(Value::as_str) == Some("removeFile")
+                && operation.get("name").and_then(Value::as_str) == Some("protocol-renamed.bin")
+        }));
+        assert!(operations.iter().any(|operation| {
+            operation.get("op").and_then(Value::as_str) == Some("rename")
+                && operation.get("source").and_then(Value::as_str)
+                    == Some("/home/root/releases/protocol-smoke.bin")
+                && operation.get("target").and_then(Value::as_str)
+                    == Some("/home/root/releases/protocol-renamed.bin")
+        }));
+        assert!(operations.iter().any(|operation| {
+            operation.get("op").and_then(Value::as_str) == Some("rename")
+                && operation.get("source").and_then(Value::as_str)
+                    == Some("/home/root/releases/protocol-renamed.bin")
+                && operation.get("target").and_then(Value::as_str)
+                    == Some("/home/root/releases/archive/protocol-renamed.bin")
+        }));
+        assert!(operations.iter().any(|operation| {
+            operation.get("op").and_then(Value::as_str) == Some("removeDirectory")
+                && operation.get("name").and_then(Value::as_str) == Some("logs")
+        }));
 
         manager
             .disconnect(&connected.session_id)

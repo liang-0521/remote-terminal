@@ -10,7 +10,7 @@ import {
   Sun,
   Terminal,
 } from "@phosphor-icons/react";
-import { IconButton } from "./IconButton.jsx";
+import { IconButton } from "../shared/IconButton.jsx";
 
 const ITEMS = [
   { id: "connections", label: "服务器连接", Icon: HardDrives },
@@ -26,7 +26,7 @@ const THEME_OPTIONS = [
   { id: "dark", label: "暗色", Icon: Moon },
 ];
 
-export function ActivityRail({ activeItem, settingsOpen, themeMode, onChange, onThemeModeChange, onOpenSettings }) {
+export function ActivityRail({ activeItem, expanded, settingsOpen, themeMode, onChange, onThemeModeChange, onOpenSettings }) {
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeShellRef = useRef(null);
   const themeTriggerRef = useRef(null);
@@ -78,11 +78,12 @@ export function ActivityRail({ activeItem, settingsOpen, themeMode, onChange, on
   }
 
   return (
-    <nav className="activity-rail" aria-label="主功能">
+    <nav className={`activity-rail ${expanded ? "is-expanded" : ""}`} aria-label="主功能">
       <div className="activity-rail__primary">
         {ITEMS.map(({ id, label, Icon }) => (
           <IconButton key={id} label={label} active={activeItem === id} onClick={() => onChange(id)}>
             <Icon size={25} weight={activeItem === id ? "duotone" : "regular"} />
+            <span className="activity-rail__label">{label}</span>
           </IconButton>
         ))}
       </div>
@@ -97,6 +98,7 @@ export function ActivityRail({ activeItem, settingsOpen, themeMode, onChange, on
             onClick={() => setThemeMenuOpen((open) => !open)}
           >
             <ThemeIcon size={23} />
+            <span className="activity-rail__label">界面主题</span>
           </IconButton>
           {themeMenuOpen && (
             <div className="activity-rail__theme-menu" role="menu" aria-label="界面主题">
@@ -120,6 +122,7 @@ export function ActivityRail({ activeItem, settingsOpen, themeMode, onChange, on
         </div>
         <IconButton label="设置" active={settingsOpen} onClick={onOpenSettings}>
           <Gear size={24} />
+          <span className="activity-rail__label">设置</span>
         </IconButton>
       </div>
     </nav>

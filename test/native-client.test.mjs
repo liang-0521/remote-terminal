@@ -15,7 +15,12 @@ function createTauriApi(overrides = {}) {
     handlers,
     async invoke(command, args) {
       calls.push({ type: "invoke", command, args });
-      if (command === "completion_catalog") return [];
+      if ([
+        "completion_catalog",
+        "command_history_list",
+        "command_history_record",
+        "command_history_remove",
+      ].includes(command)) return [];
       return { command, args };
     },
     async listen(eventName, handler) {
@@ -52,7 +57,17 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
   await client.ssh.connect({ connectionId: "server-1", dimensions: { cols: 120, rows: 32 } });
   await client.terminal.resize("session-1", { cols: 80, rows: 24 });
   await client.terminal.completions("session-1");
+  await client.terminal.history.list("server-1");
+  await client.terminal.history.record("server-1", "ls -lah");
+  await client.terminal.history.remove("server-1", "ls -lah");
   await client.sftp.list("session-1", "/root");
+  await client.sftp.remove("session-1", "/root/old.log", "file");
+  await client.sftp.rename(
+    "session-1",
+    "/root/release.zip",
+    "/root/archive/release.zip",
+    "file",
+  );
   await client.monitor.sample("session-1");
 
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
@@ -68,8 +83,51 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
       args: { sessionId: "session-1", dimensions: { cols: 80, rows: 24 } },
     },
     { type: "invoke", command: "completion_catalog", args: { sessionId: "session-1" } },
+    { type: "invoke", command: "command_history_list", args: { connectionId: "server-1" } },
+    {
+      type: "invoke",
+      command: "command_history_record",
+      args: { connectionId: "server-1", command: "ls -lah" },
+    },
+    {
+      type: "invoke",
+      command: "command_history_remove",
+      args: { connectionId: "server-1", command: "ls -lah" },
+    },
     { type: "invoke", command: "sftp_list", args: { sessionId: "session-1", path: "/root" } },
+    {
+      type: "invoke",
+      command: "sftp_remove",
+      args: { sessionId: "session-1", path: "/root/old.log", expectedEntryType: "file" },
+    },
+    {
+      type: "invoke",
+      command: "sftp_rename",
+      args: {
+        sessionId: "session-1",
+        sourcePath: "/root/release.zip",
+        targetPath: "/root/archive/release.zip",
+        expectedEntryType: "file",
+      },
+    },
     { type: "invoke", command: "monitor_sample", args: { sessionId: "session-1" } },
+  ]);
+});
+
+test("Tauri 数据目录 API 只传递路径并返回原生状态", async () => {
+  const api = createTauriApi();
+  const client = createNativeClient(api);
+
+  await client.storage.dataDirectoryStatus();
+  await client.storage.changeDataDirectory("D:\\Remote Terminal Data");
+
+  assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
+    { type: "invoke", command: "data_directory_status", args: undefined },
+    {
+      type: "invoke",
+      command: "data_directory_change",
+      args: { targetPath: "D:\\Remote Terminal Data" },
+    },
   ]);
 });
 
@@ -95,15 +153,40 @@ test("Tauri 智能补全目录必须是数组，畸形响应作为显式契约�
   );
 });
 
-test("Tauri 智能补全保留远端命令与历史来源契约", async () => {
-  const expected = [
-    { command: "ls", source: "remote-command" },
-    { command: "journalctl -xe", source: "history" },
-  ];
+test("Tauri 远端补全只接受远端可执行命令，不再接受远端 Shell 历史", async () => {
+  const expected = [{ command: "ls", source: "remote-command" }];
   const api = createTauriApi({ async invoke() { return expected; } });
   const client = createNativeClient(api);
 
   assert.deepEqual(await client.terminal.completions("session-1"), expected);
+
+  api.invoke = async () => [{ command: "journalctl -xe", source: "history" }];
+  await assert.rejects(
+    client.terminal.completions("session-1"),
+    (error) => error instanceof NativeClientError && error.code === "INVALID_COMPLETION_CATALOG",
+  );
+});
+
+test("Tauri 本机命令历史按服务器调用并严格校验原生响应", async () => {
+  const expected = ["ls -lah", "pwd"];
+  const api = createTauriApi({ async invoke() { return expected; } });
+  const client = createNativeClient(api);
+
+  assert.deepEqual(await client.terminal.history.list("server-1"), expected);
+  assert.deepEqual(await client.terminal.history.record("server-1", "whoami"), expected);
+  assert.deepEqual(await client.terminal.history.remove("server-1", "pwd"), expected);
+
+  for (const invalid of [
+    ["duplicate", "duplicate"],
+    ["contains\ncontrol"],
+    { commands: [] },
+  ]) {
+    api.invoke = async () => invalid;
+    await assert.rejects(
+      client.terminal.history.list("server-1"),
+      (error) => error instanceof NativeClientError && error.code === "INVALID_COMMAND_HISTORY",
+    );
+  }
 });
 
 test("Tauri 事件把 Event payload 还原为旧回调契约且支持提前取消", async () => {
@@ -162,12 +245,19 @@ test("Tauri 关闭策略保持持久化命令和关闭请求事件契约", async
   await unsubscribe.ready;
 
   const requestId = "8f2d624f-36cc-4a81-8724-73b165ea6f5f";
-  api.handlers.get("app://close-requested")({ payload: { requestId, behavior: "ask" } });
+  api.handlers.get("app://close-requested")({
+    payload: { requestId, behavior: "ask", activeSessionCount: 2, activeTransferCount: 1 },
+  });
   await client.app.getCloseBehavior();
   await client.app.setCloseBehavior("background");
   await client.app.resolveCloseRequest(requestId, "background");
 
-  assert.deepEqual(received, [{ requestId, behavior: "ask" }]);
+  assert.deepEqual(received, [{
+    requestId,
+    behavior: "ask",
+    activeSessionCount: 2,
+    activeTransferCount: 1,
+  }]);
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke").slice(-3), [
     { type: "invoke", command: "get_close_behavior", args: undefined },
     { type: "invoke", command: "set_close_behavior", args: { behavior: "background" } },
@@ -203,6 +293,33 @@ test("Tauri 上传只接受原生来源的 Windows 绝对路径", async () => {
   );
 });
 
+test("Tauri 远程文件拖出准备只调用原生缓存命令并可显式释放", async () => {
+  const api = createTauriApi();
+  const client = createNativeClient(api);
+
+  await client.sftp.downloadToCache("session-1", "/var/log/app.log");
+  await client.sftp.startCachedDrag("7ce232de-9687-4f34-88fb-243d3765a20d");
+  await client.sftp.releaseCachedDownload("7ce232de-9687-4f34-88fb-243d3765a20d");
+
+  assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
+    {
+      type: "invoke",
+      command: "sftp_download_to_cache",
+      args: { sessionId: "session-1", remotePath: "/var/log/app.log" },
+    },
+    {
+      type: "invoke",
+      command: "sftp_start_cached_drag",
+      args: { cacheId: "7ce232de-9687-4f34-88fb-243d3765a20d" },
+    },
+    {
+      type: "invoke",
+      command: "sftp_release_cached_download",
+      args: { cacheId: "7ce232de-9687-4f34-88fb-243d3765a20d" },
+    },
+  ]);
+});
+
 test("Tauri 原生拖放事件只暴露受信任的路径 payload", async () => {
   const api = createTauriApi();
   const client = createNativeClient(api);
@@ -217,11 +334,13 @@ test("Tauri 原生拖放事件只暴露受信任的路径 payload", async () => 
 });
 
 test("Tauri 文件选择器和剪贴板使用官方插件并返回可上传路径", async () => {
-  let dialogOptions;
+  const dialogOptions = [];
   const api = createTauriApi({
     async openDialog(options) {
-      dialogOptions = options;
-      return ["C:\\logs\\one.log", "D:\\logs\\two.log"];
+      dialogOptions.push(options);
+      return options.directory
+        ? "D:\\Remote Terminal Data"
+        : ["C:\\logs\\one.log", "D:\\logs\\two.log"];
     },
   });
   const client = createNativeClient(api);
@@ -230,7 +349,14 @@ test("Tauri 文件选择器和剪贴板使用官方插件并返回可上传路�
     { localPath: "C:\\logs\\one.log" },
     { localPath: "D:\\logs\\two.log" },
   ]);
-  assert.deepEqual(dialogOptions, { title: "选择日志", directory: false, multiple: true });
+  assert.equal(
+    await client.dialog.openDirectory({ title: "选择数据目录" }),
+    "D:\\Remote Terminal Data",
+  );
+  assert.deepEqual(dialogOptions, [
+    { title: "选择日志", directory: false, multiple: true },
+    { title: "选择数据目录", directory: true, multiple: false },
+  ]);
   assert.equal(await client.clipboard.readText(), "clipboard");
   await client.clipboard.writeText("copy me");
   assert.deepEqual(api.calls.at(-1), { type: "clipboard-write", text: "copy me" });

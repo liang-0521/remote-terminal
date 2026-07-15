@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
   ArrowCounterClockwise,
+  Database,
+  Desktop,
+  FolderOpen,
   Image,
   Palette,
   Power,
@@ -9,7 +12,7 @@ import {
   UploadSimple,
   X,
 } from "@phosphor-icons/react";
-import { useModalFocus } from "./useModalFocus.js";
+import { useModalFocus } from "../shared/useModalFocus.js";
 
 const MAX_WALLPAPER_BYTES = 8 * 1024 * 1024;
 
@@ -23,9 +26,41 @@ const ACCENT_PRESETS = [
   { name: "紫罗兰", value: "#9d84f8" },
   { name: "天空蓝", value: "#60a5fa" },
   { name: "青绿色", value: "#2dd4bf" },
+  { name: "翡翠绿", value: "#22c55e" },
   { name: "琥珀色", value: "#f59e0b" },
+  { name: "珊瑚红", value: "#f43f5e" },
   { name: "玫红色", value: "#ec4899" },
+  { name: "石墨黑", value: "#111827" },
+  { name: "冰雪白", value: "#f8fafc" },
 ];
+
+const TERMINAL_BACKGROUND_PRESETS = [
+  { name: "午夜蓝", value: "#061423" },
+  { name: "纯黑", value: "#000000" },
+  { name: "炭黑", value: "#111827" },
+  { name: "暖灰", value: "#1c1917" },
+  { name: "纸白", value: "#f8fafc" },
+  { name: "纯白", value: "#ffffff" },
+];
+
+const TERMINAL_FOREGROUND_PRESETS = [
+  { name: "雾白", value: "#c8cbd1" },
+  { name: "纯白", value: "#ffffff" },
+  { name: "柔黑", value: "#111827" },
+  { name: "纯黑", value: "#000000" },
+  { name: "终端绿", value: "#86efac" },
+  { name: "琥珀黄", value: "#facc15" },
+];
+
+const SETTINGS_PAGES = [
+  { id: "appearance", label: "外观", description: "界面与终端", Icon: Palette },
+  { id: "storage", label: "数据与存储", description: "目录与凭据", Icon: Database },
+  { id: "application", label: "应用", description: "后台与更新", Icon: Desktop },
+];
+
+function normalizeComparablePath(value) {
+  return String(value || "").trim().replace(/[\\/]+$/, "").toLowerCase();
+}
 
 export function SettingsDialog({
   open,
@@ -33,6 +68,9 @@ export function SettingsDialog({
   onThemeChange,
   onWallpaperChange,
   onRemoveWallpaper,
+  dataDirectoryStatus,
+  onChooseDataDirectory,
+  onChangeDataDirectory,
   closeBehavior,
   closeBehaviorError,
   onCloseBehaviorChange,
@@ -43,11 +81,17 @@ export function SettingsDialog({
   onInstallUpdate,
   onClose,
 }) {
+  const [activePage, setActivePage] = useState("appearance");
   const [fileError, setFileError] = useState("");
+  const [storageTarget, setStorageTarget] = useState("");
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageError, setStorageError] = useState("");
+  const [storageResult, setStorageResult] = useState(null);
   const panelRef = useRef(null);
   const closeButtonRef = useRef(null);
   const fileInputRef = useRef(null);
   const readerRef = useRef(null);
+  const pageButtonRefs = useRef([]);
 
   useModalFocus({
     open,
@@ -58,12 +102,17 @@ export function SettingsDialog({
 
   useEffect(() => {
     if (!open) return undefined;
+    setActivePage("appearance");
     setFileError("");
+    setStorageTarget(dataDirectoryStatus?.pendingPath || dataDirectoryStatus?.currentPath || "");
+    setStorageBusy(false);
+    setStorageError("");
+    setStorageResult(null);
     return () => {
       if (readerRef.current?.readyState === FileReader.LOADING) readerRef.current.abort();
       readerRef.current = null;
     };
-  }, [open]);
+  }, [dataDirectoryStatus?.currentPath, dataDirectoryStatus?.pendingPath, open]);
 
   if (!open) return null;
 
@@ -76,6 +125,10 @@ export function SettingsDialog({
     || updatePhase === "disabled"
     || (updateReady && hasActiveTransfers);
   const updateStatus = describeUpdateStatus(updateState, hasActiveTransfers, updateActionError);
+  const normalizedStorageTarget = normalizeComparablePath(storageTarget);
+  const storageTargetUnchanged = Boolean(normalizedStorageTarget)
+    && [dataDirectoryStatus?.currentPath, dataDirectoryStatus?.pendingPath]
+      .some((path) => normalizeComparablePath(path) === normalizedStorageTarget);
 
   function updateTheme(patch) {
     onThemeChange({ ...theme, ...patch });
@@ -129,6 +182,50 @@ export function SettingsDialog({
     onRemoveWallpaper();
   }
 
+  function selectPage(pageId) {
+    setActivePage(pageId);
+    setFileError("");
+  }
+
+  function handlePageKeyDown(event, currentIndex) {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? SETTINGS_PAGES.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + SETTINGS_PAGES.length) % SETTINGS_PAGES.length;
+    selectPage(SETTINGS_PAGES[nextIndex].id);
+    pageButtonRefs.current[nextIndex]?.focus();
+  }
+
+  async function chooseDataDirectory() {
+    setStorageError("");
+    try {
+      const selectedPath = await onChooseDataDirectory?.();
+      if (selectedPath) setStorageTarget(selectedPath);
+    } catch (error) {
+      setStorageError(error?.message || "无法打开文件夹选择器。");
+    }
+  }
+
+  async function applyDataDirectory() {
+    setStorageBusy(true);
+    setStorageError("");
+    setStorageResult(null);
+    try {
+      const result = await onChangeDataDirectory?.(storageTarget);
+      if (result) {
+        setStorageResult(result);
+        setStorageTarget(result.status?.pendingPath || result.status?.currentPath || storageTarget);
+      }
+    } catch (error) {
+      setStorageError(error?.message || "无法迁移应用数据目录。");
+    } finally {
+      setStorageBusy(false);
+    }
+  }
+
   return (
     <div
       className="settings-dialog"
@@ -143,7 +240,9 @@ export function SettingsDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-dialog-title"
-        aria-describedby="settings-dialog-description settings-session-note"
+        aria-describedby={activePage === "appearance"
+          ? "settings-dialog-description settings-session-note"
+          : "settings-dialog-description"}
         tabIndex={-1}
       >
         <header className="settings-panel__header">
@@ -153,7 +252,7 @@ export function SettingsDialog({
             </span>
             <div>
               <h2 id="settings-dialog-title">设置</h2>
-              <p id="settings-dialog-description">调整工作台外观并管理客户端更新。</p>
+              <p id="settings-dialog-description">管理工作台外观、数据位置与应用行为。</p>
             </div>
           </div>
           <button
@@ -167,7 +266,35 @@ export function SettingsDialog({
           </button>
         </header>
 
-        <form className="settings-form" onSubmit={(event) => event.preventDefault()}>
+        <div className="settings-panel__body">
+          <nav className="settings-navigation" role="tablist" aria-label="设置页面" aria-orientation="vertical">
+            {SETTINGS_PAGES.map(({ id, label, description, Icon }, index) => (
+              <button
+                ref={(element) => { pageButtonRefs.current[index] = element; }}
+                id={`settings-tab-${id}`}
+                key={id}
+                type="button"
+                role="tab"
+                aria-controls="settings-page-content"
+                aria-selected={activePage === id}
+                tabIndex={activePage === id ? 0 : -1}
+                onClick={() => selectPage(id)}
+                onKeyDown={(event) => handlePageKeyDown(event, index)}
+              >
+                <Icon size={20} weight={activePage === id ? "duotone" : "regular"} />
+                <span><strong>{label}</strong><small>{description}</small></span>
+              </button>
+            ))}
+          </nav>
+
+          <form
+            id="settings-page-content"
+            className="settings-form"
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${activePage}`}
+            onSubmit={(event) => event.preventDefault()}
+          >
+          {activePage === "appearance" && <>
           <div id="settings-session-note" className="settings-form__notice" role="note">
             <strong>仅当前页面会话</strong>
             <span>这些外观设置不会写入本地存储，刷新或关闭页面后将恢复默认值。</span>
@@ -186,44 +313,27 @@ export function SettingsDialog({
             </div>
 
             <div className="settings-form__color-grid">
-              <ColorField
+              <ColorSetting
                 id="settings-accent"
                 label="强调色"
                 value={theme.accent}
+                presets={ACCENT_PRESETS}
                 onChange={(value) => updateTheme({ accent: value })}
               />
-              <ColorField
+              <ColorSetting
                 id="settings-terminal-background"
                 label="终端背景色"
                 value={theme.terminalBackground}
+                presets={TERMINAL_BACKGROUND_PRESETS}
                 onChange={(value) => updateTheme({ terminalBackground: value })}
               />
-              <ColorField
+              <ColorSetting
                 id="settings-terminal-foreground"
                 label="终端文字色"
                 value={theme.terminalForeground}
+                presets={TERMINAL_FOREGROUND_PRESETS}
                 onChange={(value) => updateTheme({ terminalForeground: value })}
               />
-            </div>
-
-            <div className="settings-form__presets" role="group" aria-label="强调色预设">
-              <span>强调色预设</span>
-              <div className="settings-form__preset-list">
-                {ACCENT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    className="settings-form__preset"
-                    aria-label={`使用${preset.name}强调色`}
-                    aria-pressed={theme.accent.toLowerCase() === preset.value.toLowerCase()}
-                    title={preset.name}
-                    onClick={() => updateTheme({ accent: preset.value })}
-                  >
-                    <span style={{ backgroundColor: preset.value }} aria-hidden="true" />
-                    <small>{preset.name}</small>
-                  </button>
-                ))}
-              </div>
             </div>
           </section>
 
@@ -300,6 +410,76 @@ export function SettingsDialog({
             </label>
           </section>
 
+          </>}
+
+          {activePage === "storage" && (
+            <section className="settings-form__storage-page" aria-labelledby="settings-storage-title">
+              <div className="settings-form__page-heading">
+                <div>
+                  <h3 id="settings-storage-title">数据与存储</h3>
+                  <p>连接配置和主机指纹可以迁移；密码与 WebView2 缓存继续由 Windows 管理。</p>
+                </div>
+              </div>
+
+              <section className="settings-form__section">
+                <div className="settings-form__section-heading">
+                  <div>
+                    <h3>应用数据目录</h3>
+                    <p>更改后会复制并校验数据，旧目录保留用于回滚；重启客户端后切换。</p>
+                  </div>
+                  {dataDirectoryStatus?.restartRequired && <span className="settings-storage__restart">等待重启</span>}
+                </div>
+
+                <dl className="settings-storage__paths">
+                  <div><dt>当前使用</dt><dd title={dataDirectoryStatus?.currentPath}>{dataDirectoryStatus?.currentPath || "正在读取…"}</dd></div>
+                  <div><dt>默认位置</dt><dd title={dataDirectoryStatus?.defaultPath}>{dataDirectoryStatus?.defaultPath || "正在读取…"}</dd></div>
+                  {dataDirectoryStatus?.pendingPath && <div><dt>重启后使用</dt><dd title={dataDirectoryStatus.pendingPath}>{dataDirectoryStatus.pendingPath}</dd></div>}
+                </dl>
+
+                <label className="settings-storage__target" htmlFor="settings-storage-target">
+                  <span>新数据目录</span>
+                  <span>
+                    <input
+                      id="settings-storage-target"
+                      value={storageTarget}
+                      spellCheck="false"
+                      disabled={storageBusy}
+                      onChange={(event) => setStorageTarget(event.target.value)}
+                    />
+                    <button type="button" disabled={storageBusy} onClick={() => void chooseDataDirectory()}>
+                      <FolderOpen size={17} />
+                      选择文件夹
+                    </button>
+                  </span>
+                </label>
+
+                <div className="settings-storage__actions">
+                  <small>不能选择磁盘根目录、网络共享或重解析点；活动 SSH/传输期间不能迁移。</small>
+                  <button
+                    type="button"
+                    disabled={storageBusy || !storageTarget.trim() || storageTargetUnchanged}
+                    onClick={() => void applyDataDirectory()}
+                  >
+                    {storageBusy ? "正在迁移…" : "迁移并在下次启动使用"}
+                  </button>
+                </div>
+                {storageError && <small className="settings-form__error" role="alert">{storageError}</small>}
+                {storageResult && (
+                  <div className="settings-storage__success" role="status">
+                    已校验并迁移 {storageResult.migratedFiles?.length || 0} 个数据文件。旧目录仍保留，重启客户端后生效。
+                  </div>
+                )}
+              </section>
+
+              <div className="settings-storage__cards">
+                <section><strong>连接与主机指纹</strong><span>存放在上方应用数据目录，可安全迁移。</span></section>
+                <section><strong>服务器密码</strong><span>保存在 Windows Credential Manager，不写入 JSON，也不随目录迁移。</span></section>
+                <section><strong>WebView2 缓存</strong><span>由 Windows 放在本地应用缓存目录，不属于业务数据，不提供迁移。</span></section>
+              </div>
+            </section>
+          )}
+
+          {activePage === "application" && <>
           {closeBehavior && (
             <section className="settings-form__section" aria-labelledby="settings-close-title">
               <div className="settings-form__section-heading">
@@ -381,13 +561,16 @@ export function SettingsDialog({
             </section>
           )}
 
+          </>}
+
           <footer className="settings-form__footer">
-            <span>更改已应用到当前页面。</span>
+            <span>{activePage === "appearance" ? "外观更改只应用到当前页面会话。" : activePage === "storage" ? "目录切换需要重启客户端。" : "应用设置会保存在本机。"}</span>
             <button type="button" className="settings-form__done" onClick={onClose}>
               完成
             </button>
           </footer>
-        </form>
+          </form>
+        </div>
       </section>
     </div>
   );
@@ -438,5 +621,29 @@ function ColorField({ id, label, value, onChange }) {
         <code>{value.toUpperCase()}</code>
       </span>
     </label>
+  );
+}
+
+function ColorSetting({ id, label, value, presets, onChange }) {
+  return (
+    <div className="settings-form__color-setting">
+      <ColorField id={id} label={label} value={value} onChange={onChange} />
+      <div className="settings-form__preset-list" role="group" aria-label={`${label}预设`}>
+        {presets.map((preset) => (
+          <button
+            key={preset.value}
+            type="button"
+            className="settings-form__preset"
+            aria-label={`${label}使用${preset.name}`}
+            aria-pressed={value.toLowerCase() === preset.value.toLowerCase()}
+            title={preset.name}
+            onClick={() => onChange(preset.value)}
+          >
+            <span style={{ backgroundColor: preset.value }} aria-hidden="true" />
+            <small>{preset.name}</small>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
