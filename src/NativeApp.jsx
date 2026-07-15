@@ -117,6 +117,9 @@ export function NativeApp() {
   const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
   const [interfaceThemeMode, setInterfaceThemeMode] = useState("system");
+  const [commandAssistanceMode, setCommandAssistanceMode] = useState("auto");
+  const [uiPreferencesReady, setUiPreferencesReady] = useState(false);
+  const [uiPreferencesError, setUiPreferencesError] = useState("");
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => (
     typeof window.matchMedia !== "function"
       ? true
@@ -136,8 +139,81 @@ export function NativeApp() {
   const directoryRequestsRef = useRef(new Map());
   const completionRequestsRef = useRef(new Map());
   const monitorInFlightRef = useRef(new Set());
+  const uiPreferencesLoadedRef = useRef(false);
+  const uiPreferencesSaveQueueRef = useRef(Promise.resolve());
   activeConnectionIdRef.current = activeConnectionId;
   const interfaceColorScheme = resolveInterfaceColorScheme(interfaceThemeMode, systemPrefersDark);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client.app.getUiPreferences()
+      .then((preferences) => {
+        if (cancelled) return;
+        setInterfaceThemeMode(preferences.interfaceThemeMode);
+        setAppearance((current) => ({ ...current, ...preferences.appearance }));
+        setExplorerWidth(Math.round(preferences.explorerWidth));
+        setRailExpanded(preferences.railExpanded);
+        setBottomVisible(preferences.bottomVisible);
+        setBottomCollapsed(preferences.bottomCollapsed);
+        setBottomPanelHeight(Math.round(preferences.bottomPanelHeight));
+        setCommandAssistanceMode(preferences.commandAssistanceMode);
+        setUiPreferencesError("");
+        uiPreferencesLoadedRef.current = true;
+      })
+      .catch((error) => {
+        if (!cancelled) setUiPreferencesError(error.message || "无法读取已保存的界面设置。");
+      })
+      .finally(() => {
+        if (!cancelled) setUiPreferencesReady(true);
+      });
+    return () => { cancelled = true; };
+  }, [client]);
+
+  useEffect(() => {
+    if (!uiPreferencesReady || !uiPreferencesLoadedRef.current) return;
+    const preferences = {
+      interfaceThemeMode,
+      appearance: {
+        accent: appearance.accent,
+        terminalBackground: appearance.terminalBackground,
+        terminalForeground: appearance.terminalForeground,
+        wallpaperOpacity: appearance.wallpaperOpacity,
+      },
+      explorerWidth,
+      railExpanded,
+      bottomVisible,
+      bottomCollapsed,
+      bottomPanelHeight,
+      commandAssistanceMode,
+    };
+    const request = uiPreferencesSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => client.app.setUiPreferences(preferences));
+    uiPreferencesSaveQueueRef.current = request;
+    let active = true;
+    void request
+      .then(() => {
+        if (active) setUiPreferencesError("");
+      })
+      .catch((error) => {
+        if (active) setUiPreferencesError(error.message || "无法保存界面设置。");
+      });
+    return () => { active = false; };
+  }, [
+    appearance.accent,
+    appearance.terminalBackground,
+    appearance.terminalForeground,
+    appearance.wallpaperOpacity,
+    bottomCollapsed,
+    bottomPanelHeight,
+    bottomVisible,
+    client,
+    commandAssistanceMode,
+    explorerWidth,
+    interfaceThemeMode,
+    railExpanded,
+    uiPreferencesReady,
+  ]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
@@ -849,7 +925,7 @@ export function NativeApp() {
 
   const taskPanelHeight = bottomVisible && activeServer ? (bottomCollapsed ? 52 : bottomPanelHeight) : 0;
 
-  if (loading) {
+  if (loading || !uiPreferencesReady) {
     return <main className="native-startup-state" role="status"><HardDrives size={34} weight="duotone" /><strong>正在加载本机连接配置…</strong></main>;
   }
   if (fatalError) {
@@ -930,6 +1006,7 @@ export function NativeApp() {
                 sessions={sessions}
                 activeSessionId={activeConnectionId}
                 appearance={appearance}
+                commandAssistanceMode={commandAssistanceMode}
                 onSessionSelect={setActiveConnectionId}
                 onSessionAdd={() => openConnections("new")}
                 onSessionClose={closeWorkspace}
@@ -1005,6 +1082,9 @@ export function NativeApp() {
         closeBehavior={closeBehavior}
         closeBehaviorError={closeBehaviorError}
         onCloseBehaviorChange={changeCloseBehavior}
+        commandAssistanceMode={commandAssistanceMode}
+        onCommandAssistanceModeChange={setCommandAssistanceMode}
+        uiPreferencesError={uiPreferencesError}
         updateState={updateState}
         updateActionError={updateActionError}
         hasActiveTransfers={hasActiveTransfers}

@@ -13,7 +13,7 @@ use crate::{
         RemoteEntryRemoval, RemoteEntryRename, TerminalAttachResult, TerminalDimensions,
         TransferSummary, UploadFile,
     },
-    state::{AppState, CloseBehavior, DataDirectoryStatus},
+    state::{AppState, CloseBehavior, DataDirectoryStatus, UiPreferences},
     storage::{Connection, ConnectionDraft, ConnectionRemoval},
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,24 @@ pub fn set_close_behavior(
         .set_close_behavior(behavior)
         .map_err(|_| AppError::new("SETTINGS_WRITE_FAILED", "无法保存主窗口关闭行为设置。"))?;
     Ok(behavior)
+}
+
+#[tauri::command]
+pub fn get_ui_preferences(state: State<'_, AppState>) -> AppResult<UiPreferences> {
+    state
+        .ui_preferences()
+        .map_err(|_| AppError::new("SETTINGS_READ_FAILED", "无法读取界面与命令提示设置。"))
+}
+
+#[tauri::command]
+pub fn set_ui_preferences(
+    preferences: UiPreferences,
+    state: State<'_, AppState>,
+) -> AppResult<UiPreferences> {
+    state
+        .set_ui_preferences(preferences.clone())
+        .map_err(|_| AppError::new("SETTINGS_WRITE_FAILED", "无法保存界面与命令提示设置。"))?;
+    Ok(preferences)
 }
 
 #[tauri::command]

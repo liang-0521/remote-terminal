@@ -6,6 +6,7 @@ import {
   Desktop,
   FolderOpen,
   Image,
+  Keyboard,
   Palette,
   Power,
   Trash,
@@ -74,6 +75,9 @@ export function SettingsDialog({
   closeBehavior,
   closeBehaviorError,
   onCloseBehaviorChange,
+  commandAssistanceMode = "auto",
+  onCommandAssistanceModeChange,
+  uiPreferencesError = "",
   updateState,
   updateActionError,
   hasActiveTransfers = false,
@@ -296,8 +300,8 @@ export function SettingsDialog({
           >
           {activePage === "appearance" && <>
           <div id="settings-session-note" className="settings-form__notice" role="note">
-            <strong>仅当前页面会话</strong>
-            <span>这些外观设置不会写入本地存储，刷新或关闭页面后将恢复默认值。</span>
+            <strong>自动保存到本机</strong>
+            <span>界面主题、颜色和工作台布局会在下次启动时恢复；终端背景图片仍只保留当前会话。</span>
           </div>
 
           <section className="settings-form__section" aria-labelledby="settings-color-title">
@@ -480,6 +484,35 @@ export function SettingsDialog({
           )}
 
           {activePage === "application" && <>
+          <section className="settings-form__section" aria-labelledby="settings-command-assistance-title">
+            <div className="settings-form__section-heading">
+              <div>
+                <h3 id="settings-command-assistance-title">命令提示</h3>
+                <p>控制终端输入时是否自动显示行内候选。</p>
+              </div>
+              <Keyboard size={20} aria-hidden="true" />
+            </div>
+            <fieldset className="settings-close-behavior">
+              <legend>显示方式</legend>
+              {[
+                ["auto", "输入时自动显示", "输入可靠的非空命令时显示候选；按钮和快捷键仍可打开命令搜索。"],
+                ["shortcut", "仅按钮或快捷键", "输入时不自动弹出；使用命令搜索按钮、Ctrl+Shift+P 或 Ctrl+Space 打开。"],
+              ].map(([value, label, description]) => (
+                <label key={value} htmlFor={`settings-command-assistance-${value}`}>
+                  <input
+                    id={`settings-command-assistance-${value}`}
+                    type="radio"
+                    name="command-assistance-mode"
+                    value={value}
+                    checked={commandAssistanceMode === value}
+                    onChange={() => onCommandAssistanceModeChange?.(value)}
+                  />
+                  <span><strong>{label}</strong><small>{description}</small></span>
+                </label>
+              ))}
+            </fieldset>
+          </section>
+
           {closeBehavior && (
             <section className="settings-form__section" aria-labelledby="settings-close-title">
               <div className="settings-form__section-heading">
@@ -564,7 +597,7 @@ export function SettingsDialog({
           </>}
 
           <footer className="settings-form__footer">
-            <span>{activePage === "appearance" ? "外观更改只应用到当前页面会话。" : activePage === "storage" ? "目录切换需要重启客户端。" : "应用设置会保存在本机。"}</span>
+            <span>{uiPreferencesError || (activePage === "appearance" ? "颜色与布局会保存在本机；背景图片仅当前会话。" : activePage === "storage" ? "目录切换需要重启客户端。" : "应用设置会保存在本机。")}</span>
             <button type="button" className="settings-form__done" onClick={onClose}>
               完成
             </button>

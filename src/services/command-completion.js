@@ -346,21 +346,23 @@ export function searchInlineCommandCompletions(
   const resultLimit = Number.isInteger(limit) && limit >= 0 ? limit : 10;
   if (!normalizedQuery) return [];
 
-  // Once the current line is already an executable catalog command, the
-  // inline surface should get out of the way. Longer names remain available
-  // from the explicit command library instead of replacing a complete input.
-  if (completions.some((completion) => normalizeSearchText(completion.command) === normalizedQuery)) {
-    return [];
-  }
-
   if (/^[\x20-\x7e]+$/.test(normalizedQuery)) {
     const commandPrefixes = completions
       .filter((completion) => {
         const command = normalizeSearchText(completion.command);
-        return command !== normalizedQuery && command.startsWith(normalizedQuery);
+        return command.startsWith(normalizedQuery);
       })
+      .map((completion, sourceIndex) => ({
+        completion,
+        sourceIndex,
+        matchType: normalizeSearchText(completion.command) === normalizedQuery ? "exact" : "prefix",
+      }))
+      .sort((left, right) => (
+        Number(right.matchType === "exact") - Number(left.matchType === "exact")
+        || left.sourceIndex - right.sourceIndex
+      ))
       .slice(0, resultLimit)
-      .map((completion) => ({ ...completion, matchType: "prefix" }));
+      .map(({ completion, matchType }) => ({ ...completion, matchType }));
     if (commandPrefixes.length) return commandPrefixes;
   }
 
@@ -368,8 +370,7 @@ export function searchInlineCommandCompletions(
     completions,
     limit: resultLimit,
     prioritizeHistory: false,
-  })
-    .filter((completion) => normalizeSearchText(completion.command) !== normalizedQuery);
+  });
 }
 
 export function nextCommandCompletionIndex(currentIndex, key, length) {

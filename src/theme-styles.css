@@ -145,6 +145,27 @@
   box-shadow: 0 12px 28px var(--shadow-popover);
 }
 
+.remote-file-context-menu {
+  border-color: var(--popover-border);
+  color: var(--text-primary);
+  background: var(--surface-completion-native);
+  box-shadow: 0 14px 36px var(--shadow-popover);
+}
+
+.remote-file-context-menu > button:hover,
+.remote-file-context-menu > button:focus-visible {
+  background: var(--surface-accent-selected);
+}
+
+.remote-file-context-menu > button.is-danger {
+  color: var(--danger);
+}
+
+.remote-file-context-menu > button.is-danger:hover,
+.remote-file-context-menu > button.is-danger:focus-visible {
+  background: var(--surface-danger-soft);
+}
+
 .server-picker__menu button.is-current {
   color: var(--accent-emphasis);
   background: var(--surface-accent-selected);
@@ -339,13 +360,13 @@
   background: var(--surface-scrim);
 }
 
-.native-dialog {
+.native-dialog-backdrop {
   background: var(--surface-scrim-strong);
 }
 
 .connection-manager,
 .settings-panel,
-.native-dialog__panel {
+.native-dialog {
   border-color: var(--dialog-border);
   background: var(--surface-dialog);
   box-shadow: 0 24px 70px var(--shadow-dialog);
@@ -353,7 +374,7 @@
 
 .connection-manager__header,
 .settings-panel__header,
-.native-dialog__header {
+.native-dialog > header {
   background: var(--surface-dialog-header);
 }
 
@@ -399,8 +420,26 @@
 
 .native-command-palette__header,
 .native-dialog__summary,
-.native-dialog__footer {
+.native-dialog__footer,
+.native-dialog > footer {
   background: var(--surface-native-header);
+}
+
+.close-request-dialog__choice,
+.remote-delete-dialog__target,
+.remote-rename-dialog__field input,
+.native-password-field input {
+  background: var(--surface-input);
+}
+
+.close-request-dialog__choice:hover,
+.close-request-dialog__choice:focus-visible {
+  background: var(--surface-accent-selected);
+}
+
+.native-dialog header > button:hover,
+.native-password-field > button:hover {
+  background: var(--surface-hover);
 }
 
 .native-dialog__request,

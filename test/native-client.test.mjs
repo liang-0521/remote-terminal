@@ -250,6 +250,23 @@ test("Tauri 关闭策略保持持久化命令和关闭请求事件契约", async
   });
   await client.app.getCloseBehavior();
   await client.app.setCloseBehavior("background");
+  const preferences = {
+    interfaceThemeMode: "dark",
+    appearance: {
+      accent: "#60a5fa",
+      terminalBackground: "#000000",
+      terminalForeground: "#ffffff",
+      wallpaperOpacity: 0.22,
+    },
+    explorerWidth: 360,
+    railExpanded: true,
+    bottomVisible: true,
+    bottomCollapsed: false,
+    bottomPanelHeight: 300,
+    commandAssistanceMode: "shortcut",
+  };
+  await client.app.getUiPreferences();
+  await client.app.setUiPreferences(preferences);
   await client.app.resolveCloseRequest(requestId, "background");
 
   assert.deepEqual(received, [{
@@ -258,9 +275,11 @@ test("Tauri 关闭策略保持持久化命令和关闭请求事件契约", async
     activeSessionCount: 2,
     activeTransferCount: 1,
   }]);
-  assert.deepEqual(api.calls.filter((item) => item.type === "invoke").slice(-3), [
+  assert.deepEqual(api.calls.filter((item) => item.type === "invoke").slice(-5), [
     { type: "invoke", command: "get_close_behavior", args: undefined },
     { type: "invoke", command: "set_close_behavior", args: { behavior: "background" } },
+    { type: "invoke", command: "get_ui_preferences", args: undefined },
+    { type: "invoke", command: "set_ui_preferences", args: { preferences } },
     { type: "invoke", command: "resolve_close_request", args: { requestId, action: "background" } },
   ]);
   unsubscribe();

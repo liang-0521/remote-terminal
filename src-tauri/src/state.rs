@@ -16,6 +16,8 @@ use std::{
 use uuid::Uuid;
 
 const INSTALL_DATA_MIGRATION_VERSION: u32 = 1;
+const DEFAULT_EXPLORER_WIDTH: f64 = 320.0;
+const DEFAULT_BOTTOM_PANEL_HEIGHT: f64 = 344.0;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -24,6 +26,89 @@ pub enum CloseBehavior {
     Ask,
     Background,
     Exit,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InterfaceThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandAssistanceMode {
+    #[default]
+    Auto,
+    Shortcut,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppearancePreferences {
+    pub accent: String,
+    pub terminal_background: String,
+    pub terminal_foreground: String,
+    pub wallpaper_opacity: f64,
+}
+
+impl Default for AppearancePreferences {
+    fn default() -> Self {
+        Self {
+            accent: "#9d84f8".to_string(),
+            terminal_background: "#061423".to_string(),
+            terminal_foreground: "#c8cbd1".to_string(),
+            wallpaper_opacity: 0.22,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiPreferences {
+    #[serde(default)]
+    pub interface_theme_mode: InterfaceThemeMode,
+    #[serde(default)]
+    pub appearance: AppearancePreferences,
+    #[serde(default = "default_explorer_width")]
+    pub explorer_width: f64,
+    #[serde(default)]
+    pub rail_expanded: bool,
+    #[serde(default = "default_true")]
+    pub bottom_visible: bool,
+    #[serde(default)]
+    pub bottom_collapsed: bool,
+    #[serde(default = "default_bottom_panel_height")]
+    pub bottom_panel_height: f64,
+    #[serde(default)]
+    pub command_assistance_mode: CommandAssistanceMode,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            interface_theme_mode: InterfaceThemeMode::System,
+            appearance: AppearancePreferences::default(),
+            explorer_width: DEFAULT_EXPLORER_WIDTH,
+            rail_expanded: false,
+            bottom_visible: true,
+            bottom_collapsed: false,
+            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
+            command_assistance_mode: CommandAssistanceMode::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -37,6 +122,10 @@ struct PersistedSettings {
     install_data_migration_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     install_data_directory: Option<PathBuf>,
+    #[serde(default)]
+    ui_preferences: UiPreferences,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_placement: Option<WindowPlacement>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -82,6 +171,10 @@ impl AppState {
             }
         };
         validate_install_data_migration_settings(&settings)?;
+        validate_ui_preferences(&settings.ui_preferences)?;
+        if let Some(placement) = settings.window_placement.as_ref() {
+            validate_window_placement(placement)?;
+        }
         let active_data_directory = match settings.data_directory.as_deref() {
             Some(configured) => {
                 validate_configured_data_directory(configured).map_err(|error| {
@@ -123,6 +216,54 @@ impl AppState {
             .map_err(|_| "application settings lock is poisoned".to_string())?;
         let mut next = settings.clone();
         next.close_behavior = behavior;
+        persist_settings(&self.settings_path, &next)?;
+        *settings = next;
+        Ok(())
+    }
+
+    pub fn ui_preferences(&self) -> Result<UiPreferences, String> {
+        self.settings
+            .lock()
+            .map(|settings| settings.ui_preferences.clone())
+            .map_err(|_| "application settings lock is poisoned".to_string())
+    }
+
+    pub fn set_ui_preferences(&self, preferences: UiPreferences) -> Result<(), String> {
+        validate_ui_preferences(&preferences)?;
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| "application settings lock is poisoned".to_string())?;
+        let mut next = settings.clone();
+        next.ui_preferences = preferences;
+        persist_settings(&self.settings_path, &next)?;
+        *settings = next;
+        Ok(())
+    }
+
+    pub fn window_placement(&self) -> Result<Option<WindowPlacement>, String> {
+        self.settings
+            .lock()
+            .map(|settings| settings.window_placement)
+            .map_err(|_| "application settings lock is poisoned".to_string())
+    }
+
+    pub fn remember_window_placement(&self, placement: WindowPlacement) -> Result<(), String> {
+        validate_window_placement(&placement)?;
+        self.settings
+            .lock()
+            .map(|mut settings| settings.window_placement = Some(placement))
+            .map_err(|_| "application settings lock is poisoned".to_string())
+    }
+
+    pub fn set_window_placement(&self, placement: WindowPlacement) -> Result<(), String> {
+        validate_window_placement(&placement)?;
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| "application settings lock is poisoned".to_string())?;
+        let mut next = settings.clone();
+        next.window_placement = Some(placement);
         persist_settings(&self.settings_path, &next)?;
         *settings = next;
         Ok(())
@@ -318,6 +459,69 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_explorer_width() -> f64 {
+    DEFAULT_EXPLORER_WIDTH
+}
+
+fn default_bottom_panel_height() -> f64 {
+    DEFAULT_BOTTOM_PANEL_HEIGHT
+}
+
+fn validate_ui_preferences(preferences: &UiPreferences) -> Result<(), String> {
+    for (label, color) in [
+        ("accent", &preferences.appearance.accent),
+        (
+            "terminal background",
+            &preferences.appearance.terminal_background,
+        ),
+        (
+            "terminal foreground",
+            &preferences.appearance.terminal_foreground,
+        ),
+    ] {
+        if !is_hex_color(color) {
+            return Err(format!("{label} color is invalid"));
+        }
+    }
+    if !preferences.appearance.wallpaper_opacity.is_finite()
+        || !(0.0..=1.0).contains(&preferences.appearance.wallpaper_opacity)
+    {
+        return Err("wallpaper opacity is invalid".to_string());
+    }
+    if !preferences.explorer_width.is_finite()
+        || !(220.0..=520.0).contains(&preferences.explorer_width)
+    {
+        return Err("explorer width is invalid".to_string());
+    }
+    if !preferences.bottom_panel_height.is_finite()
+        || !(120.0..=1_000.0).contains(&preferences.bottom_panel_height)
+    {
+        return Err("bottom panel height is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn validate_window_placement(placement: &WindowPlacement) -> Result<(), String> {
+    if placement.width < 1024
+        || placement.height < 700
+        || placement.width > 16_384
+        || placement.height > 16_384
+    {
+        return Err("window placement size is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn is_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
 fn path_text(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(ToOwned::to_owned)
@@ -348,7 +552,10 @@ fn persist_settings(path: &Path, settings: &PersistedSettings) -> Result<(), Str
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, CloseBehavior};
+    use super::{
+        AppState, CloseBehavior, CommandAssistanceMode, InterfaceThemeMode, UiPreferences,
+        WindowPlacement,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -429,6 +636,53 @@ mod tests {
             restarted.close_behavior().unwrap(),
             CloseBehavior::Background
         );
+    }
+
+    #[test]
+    fn ui_preferences_and_window_placement_survive_restart() {
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let default_path = directory.path().join("default-data");
+        let previous_default = directory.path().join("previous-default-data");
+        let state = AppState::load(
+            settings_path.clone(),
+            default_path.clone(),
+            previous_default.clone(),
+        )
+        .unwrap();
+        let mut preferences = UiPreferences::default();
+        preferences.interface_theme_mode = InterfaceThemeMode::Dark;
+        preferences.appearance.accent = "#60a5fa".to_string();
+        preferences.appearance.terminal_background = "#000000".to_string();
+        preferences.explorer_width = 408.0;
+        preferences.bottom_panel_height = 292.0;
+        preferences.command_assistance_mode = CommandAssistanceMode::Shortcut;
+        let placement = WindowPlacement {
+            x: 140,
+            y: 90,
+            width: 1280,
+            height: 760,
+            maximized: false,
+        };
+
+        state.set_ui_preferences(preferences.clone()).unwrap();
+        state.set_window_placement(placement).unwrap();
+
+        let restarted = AppState::load(settings_path, default_path, previous_default).unwrap();
+        assert_eq!(restarted.ui_preferences().unwrap(), preferences);
+        assert_eq!(restarted.window_placement().unwrap(), Some(placement));
+    }
+
+    #[test]
+    fn invalid_ui_preferences_never_replace_persisted_settings() {
+        let directory = tempdir().unwrap();
+        let state = load_state(&directory);
+        let original = state.ui_preferences().unwrap();
+        let mut invalid = original.clone();
+        invalid.appearance.accent = "not-a-color".to_string();
+
+        assert!(state.set_ui_preferences(invalid).is_err());
+        assert_eq!(state.ui_preferences().unwrap(), original);
     }
 
     #[test]

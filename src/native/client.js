@@ -40,6 +40,8 @@ const TAURI_COMMANDS = Object.freeze({
   updatesInstall: "updates_install",
   getCloseBehavior: "get_close_behavior",
   setCloseBehavior: "set_close_behavior",
+  getUiPreferences: "get_ui_preferences",
+  setUiPreferences: "set_ui_preferences",
   resolveCloseRequest: "resolve_close_request",
   showMainWindow: "show_main_window",
   quitApp: "quit_app",
@@ -515,6 +517,8 @@ function createTauriClient(api) {
     app: Object.freeze({
       getCloseBehavior: () => call(TAURI_COMMANDS.getCloseBehavior),
       setCloseBehavior: (behavior) => call(TAURI_COMMANDS.setCloseBehavior, { behavior }),
+      getUiPreferences: () => call(TAURI_COMMANDS.getUiPreferences),
+      setUiPreferences: (preferences) => call(TAURI_COMMANDS.setUiPreferences, { preferences }),
       resolveCloseRequest: (requestId, action) => call(TAURI_COMMANDS.resolveCloseRequest, { requestId, action }),
       showMainWindow: () => call(TAURI_COMMANDS.showMainWindow),
       quit: () => call(TAURI_COMMANDS.quitApp),

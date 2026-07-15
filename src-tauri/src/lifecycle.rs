@@ -1,10 +1,13 @@
 use crate::{
     backend::{BackendState, ExitPreparation},
     error::{AppError, AppResult},
-    state::{AppState, CloseBehavior},
+    state::{AppState, CloseBehavior, WindowPlacement},
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime, Window, WindowEvent};
+use tauri::{
+    window::Monitor, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime,
+    WebviewWindow, Window, WindowEvent,
+};
 
 pub const CLOSE_REQUESTED_EVENT: &str = "app://close-requested";
 
@@ -42,6 +45,40 @@ pub fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
         .ok_or_else(|| AppError::new("MAIN_WINDOW_UNAVAILABLE", "主窗口当前不可用。"))?
         .hide()
         .map_err(|_| AppError::new("MAIN_WINDOW_HIDE_FAILED", "无法隐藏主窗口。"))
+}
+
+pub fn restore_saved_window_placement<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
+    let Some(placement) = app
+        .state::<AppState>()
+        .window_placement()
+        .map_err(|_| AppError::new("SETTINGS_READ_FAILED", "无法读取上次的窗口位置。"))?
+    else {
+        return Ok(());
+    };
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| AppError::new("MAIN_WINDOW_UNAVAILABLE", "主窗口当前不可用。"))?;
+    let monitors = window
+        .placement_available_monitors()
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法检查可用显示器。"))?;
+    if !monitors
+        .iter()
+        .any(|monitor| placement_intersects_monitor(placement, monitor))
+    {
+        return Ok(());
+    }
+    window
+        .placement_set_size(PhysicalSize::new(placement.width, placement.height))
+        .and_then(|_| {
+            window.placement_set_position(PhysicalPosition::new(placement.x, placement.y))
+        })
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法恢复上次的窗口位置。"))?;
+    if placement.maximized {
+        window
+            .placement_maximize()
+            .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法恢复窗口最大化状态。"))?;
+    }
+    Ok(())
 }
 
 /// Used by a saved Exit choice, the tray Exit item, and the explicit quit IPC.
@@ -94,12 +131,20 @@ pub fn confirm_exit<R: Runtime>(app: &AppHandle<R>) {
 }
 
 pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
-    let WindowEvent::CloseRequested { api, .. } = event else {
-        return;
-    };
     if window.label() != "main" {
         return;
     }
+
+    if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+        remember_normal_window_placement(&window.state::<AppState>(), window);
+        return;
+    }
+
+    let WindowEvent::CloseRequested { api, .. } = event else {
+        return;
+    };
+
+    persist_window_placement(&window.state::<AppState>(), window);
 
     let state = window.state::<AppState>();
     if state.is_quitting() {
@@ -176,9 +221,129 @@ fn emit_close_request<R: Runtime>(
 }
 
 fn exit_now<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        persist_window_placement(&app.state::<AppState>(), &window);
+    }
     let state = app.state::<AppState>();
     state.begin_quit();
     app.exit(0);
+}
+
+trait WindowPlacementTarget {
+    fn placement_outer_position(&self) -> tauri::Result<PhysicalPosition<i32>>;
+    fn placement_outer_size(&self) -> tauri::Result<PhysicalSize<u32>>;
+    fn placement_is_minimized(&self) -> tauri::Result<bool>;
+    fn placement_is_maximized(&self) -> tauri::Result<bool>;
+    fn placement_available_monitors(&self) -> tauri::Result<Vec<Monitor>>;
+    fn placement_set_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()>;
+    fn placement_set_size(&self, size: PhysicalSize<u32>) -> tauri::Result<()>;
+    fn placement_maximize(&self) -> tauri::Result<()>;
+}
+
+macro_rules! impl_window_placement_target {
+    ($window:ident) => {
+        impl<R: Runtime> WindowPlacementTarget for $window<R> {
+            fn placement_outer_position(&self) -> tauri::Result<PhysicalPosition<i32>> {
+                self.outer_position()
+            }
+
+            fn placement_outer_size(&self) -> tauri::Result<PhysicalSize<u32>> {
+                self.outer_size()
+            }
+
+            fn placement_is_minimized(&self) -> tauri::Result<bool> {
+                self.is_minimized()
+            }
+
+            fn placement_is_maximized(&self) -> tauri::Result<bool> {
+                self.is_maximized()
+            }
+
+            fn placement_available_monitors(&self) -> tauri::Result<Vec<Monitor>> {
+                self.available_monitors()
+            }
+
+            fn placement_set_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()> {
+                self.set_position(position)
+            }
+
+            fn placement_set_size(&self, size: PhysicalSize<u32>) -> tauri::Result<()> {
+                self.set_size(size)
+            }
+
+            fn placement_maximize(&self) -> tauri::Result<()> {
+                self.maximize()
+            }
+        }
+    };
+}
+
+impl_window_placement_target!(Window);
+impl_window_placement_target!(WebviewWindow);
+
+fn remember_normal_window_placement(state: &AppState, window: &impl WindowPlacementTarget) {
+    if window.placement_is_minimized().unwrap_or(false)
+        || window.placement_is_maximized().unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(placement) = current_window_placement(window, false) else {
+        return;
+    };
+    if state.remember_window_placement(placement).is_err() {
+        eprintln!("[remote-terminal] remember window placement: NATIVE_STATE_FAILED");
+    }
+}
+
+fn persist_window_placement(state: &AppState, window: &impl WindowPlacementTarget) {
+    let maximized = window.placement_is_maximized().unwrap_or(false);
+    let placement = if maximized {
+        state
+            .window_placement()
+            .ok()
+            .flatten()
+            .map(|mut placement| {
+                placement.maximized = true;
+                placement
+            })
+            .or_else(|| current_window_placement(window, true).ok())
+    } else {
+        current_window_placement(window, false).ok()
+    };
+    let Some(placement) = placement else {
+        return;
+    };
+    if state.set_window_placement(placement).is_err() {
+        eprintln!("[remote-terminal] persist window placement: SETTINGS_WRITE_FAILED");
+    }
+}
+
+fn current_window_placement(
+    window: &impl WindowPlacementTarget,
+    maximized: bool,
+) -> Result<WindowPlacement, tauri::Error> {
+    let position = window.placement_outer_position()?;
+    let size = window.placement_outer_size()?;
+    Ok(WindowPlacement {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized,
+    })
+}
+
+fn placement_intersects_monitor(placement: WindowPlacement, monitor: &Monitor) -> bool {
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let window_right = i64::from(placement.x) + i64::from(placement.width);
+    let window_bottom = i64::from(placement.y) + i64::from(placement.height);
+    let monitor_right = i64::from(monitor_position.x) + i64::from(monitor_size.width);
+    let monitor_bottom = i64::from(monitor_position.y) + i64::from(monitor_size.height);
+    window_right > i64::from(monitor_position.x) + 64
+        && i64::from(placement.x) < monitor_right - 64
+        && window_bottom > i64::from(monitor_position.y) + 64
+        && i64::from(placement.y) < monitor_bottom - 64
 }
 
 fn clear_pending_close_request<R: Runtime>(app: &AppHandle<R>) {

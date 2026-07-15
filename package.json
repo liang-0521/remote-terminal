@@ -1,6 +1,6 @@
 {
   "name": "remote-terminal",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Windows client for SSH terminals, SFTP transfers, and Linux performance monitoring.",
   "author": "Liang",
   "private": true,

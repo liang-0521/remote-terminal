@@ -31,6 +31,7 @@ export function NativeTerminalPane({
   sessions,
   activeSessionId,
   appearance,
+  commandAssistanceMode = "auto",
   onSessionSelect,
   onSessionAdd,
   onSessionClose,
@@ -146,6 +147,7 @@ export function NativeTerminalPane({
                 active={activeSessionId === session.id}
                 focusTerminalOnActivate={keyboardTabTargetRef.current !== session.id}
                 appearance={appearance}
+                commandAssistanceMode={commandAssistanceMode}
                 remoteCompletions={session.completionCatalog}
                 completionLoading={session.completionLoading}
                 completionError={session.completionError}
@@ -173,6 +175,7 @@ function XtermSurface({
   active,
   focusTerminalOnActivate,
   appearance,
+  commandAssistanceMode,
   remoteCompletions,
   completionLoading,
   completionError,
@@ -192,6 +195,7 @@ function XtermSurface({
   const terminalInputRef = useRef(createTerminalInputState());
   const suggestionIndexRef = useRef(0);
   const suggestionsRef = useRef([]);
+  const commandAssistanceModeRef = useRef(commandAssistanceMode);
   const [inlineCompletionOpen, setInlineCompletionOpen] = useState(false);
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
   const [commandSearchQuery, setCommandSearchQuery] = useState("");
@@ -242,6 +246,7 @@ function XtermSurface({
   completionCatalogRef.current = completionCatalog;
   suggestionsRef.current = inlineSuggestions;
   suggestionIndexRef.current = selectedSuggestionIndex;
+  commandAssistanceModeRef.current = commandAssistanceMode;
 
   const focusTerminalSoon = useCallback(() => {
     window.requestAnimationFrame(() => terminalRef.current?.focus());
@@ -314,7 +319,8 @@ function XtermSurface({
       closeInlineCompletion();
       return;
     }
-    const nextOpen = shouldAutoOpenCommandCompletion(nextState, nextSuggestions.length);
+    const nextOpen = commandAssistanceModeRef.current === "auto"
+      && shouldAutoOpenCommandCompletion(nextState, nextSuggestions.length);
     inlineCompletionOpenRef.current = nextOpen;
     setInlineCompletionOpen(nextOpen);
     if (nextOpen) window.requestAnimationFrame(updateInlineAnchor);
@@ -398,6 +404,11 @@ function XtermSurface({
         window.requestAnimationFrame(() => commandSearchInputRef.current?.focus());
       });
   }, [client, connectionId, enqueueHistoryMutation, reportHistoryError]);
+
+  useEffect(() => {
+    if (commandAssistanceMode === "auto") return;
+    closeInlineCompletion();
+  }, [closeInlineCompletion, commandAssistanceMode]);
 
   useEffect(() => {
     let cancelled = false;

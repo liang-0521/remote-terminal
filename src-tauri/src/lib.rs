@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "windows"))]
-compile_error!("Remote Terminal 0.4.0 is a Windows-only desktop client.");
+compile_error!("Remote Terminal 0.4.1 is a Windows-only desktop client.");
 
 mod backend;
 mod command_history;
@@ -63,6 +63,9 @@ pub fn run() {
             if !app.manage(backend_state) {
                 return Err(std::io::Error::other("backend state already registered").into());
             }
+            if let Err(error) = lifecycle::restore_saved_window_placement(app.handle()) {
+                eprintln!("[remote-terminal] restore window placement: {}", error.code);
+            }
             tray::setup(app)?;
             Ok(())
         })
@@ -70,6 +73,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_close_behavior,
             commands::set_close_behavior,
+            commands::get_ui_preferences,
+            commands::set_ui_preferences,
             commands::resolve_close_request,
             commands::show_main_window,
             commands::quit_app,
