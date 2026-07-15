@@ -10,11 +10,10 @@ import {
 
 export function RemoteFileContextMenu({
   request,
-  dragPhase = "idle",
+  downloading = false,
   onClose,
   onOpen,
-  onPrepareDownload,
-  onStartDownloadDrag,
+  onDownload,
   onRename,
   onDelete,
   onRefresh,
@@ -33,8 +32,6 @@ export function RemoteFileContextMenu({
   const parentEntry = request.key.startsWith("parent:");
   const fileEntry = request.entry.type === "file";
   const removable = !parentEntry && ["file", "directory", "symlink"].includes(request.entry.type);
-  const preparing = dragPhase === "preparing";
-  const ready = dragPhase === "ready";
 
   function moveFocus(event) {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -78,12 +75,11 @@ export function RemoteFileContextMenu({
         <button
           type="button"
           role="menuitem"
-          disabled={preparing || dragPhase === "dragging"}
-          onClick={ready ? undefined : onPrepareDownload}
-          onPointerDown={ready ? onStartDownloadDrag : undefined}
+          disabled={downloading}
+          onClick={() => { onClose(); onDownload(); }}
         >
-          {preparing ? <CircleNotch size={16} className="is-spinning" /> : <CloudArrowDown size={16} weight={ready ? "fill" : "regular"} />}
-          <span>{preparing ? "正在准备到安全缓存…" : ready ? "按住并拖到电脑" : "下载 / 拖到电脑"}</span>
+          {downloading ? <CircleNotch size={16} className="is-spinning" /> : <CloudArrowDown size={16} />}
+          <span>{downloading ? "正在下载…" : "下载到…"}</span>
         </button>
       )}
       {removable && (

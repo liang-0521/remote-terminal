@@ -1,12 +1,11 @@
 #[cfg(not(target_os = "windows"))]
-compile_error!("Remote Terminal 0.4.1 is a Windows-only desktop client.");
+compile_error!("Remote Terminal 0.4.2 is a Windows-only desktop client.");
 
 mod backend;
 mod command_history;
 mod commands;
 mod credentials;
 mod data_directory;
-mod drag_out;
 mod error;
 mod lifecycle;
 mod monitor;
@@ -101,9 +100,7 @@ pub fn run() {
             commands::sftp_remove,
             commands::sftp_rename,
             commands::sftp_upload,
-            commands::sftp_download_to_cache,
-            commands::sftp_release_cached_download,
-            commands::sftp_start_cached_drag,
+            commands::sftp_download_to_computer,
             commands::sftp_cancel,
             commands::sftp_retry,
             commands::monitor_sample,

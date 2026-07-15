@@ -312,31 +312,32 @@ test("Tauri 上传只接受原生来源的 Windows 绝对路径", async () => {
   );
 });
 
-test("Tauri 远程文件拖出准备只调用原生缓存命令并可显式释放", async () => {
+test("Tauri 远程文件下载位置只由 Rust 原生保存窗口决定", async () => {
   const api = createTauriApi();
   const client = createNativeClient(api);
 
-  await client.sftp.downloadToCache("session-1", "/var/log/app.log");
-  await client.sftp.startCachedDrag("7ce232de-9687-4f34-88fb-243d3765a20d");
-  await client.sftp.releaseCachedDownload("7ce232de-9687-4f34-88fb-243d3765a20d");
+  await client.sftp.downloadToComputer("session-1", "/var/log/app.log");
 
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
     {
       type: "invoke",
-      command: "sftp_download_to_cache",
+      command: "sftp_download_to_computer",
       args: { sessionId: "session-1", remotePath: "/var/log/app.log" },
     },
-    {
-      type: "invoke",
-      command: "sftp_start_cached_drag",
-      args: { cacheId: "7ce232de-9687-4f34-88fb-243d3765a20d" },
-    },
-    {
-      type: "invoke",
-      command: "sftp_release_cached_download",
-      args: { cacheId: "7ce232de-9687-4f34-88fb-243d3765a20d" },
-    },
   ]);
+});
+
+test("远程文件菜单只保留下载到入口，不再暴露拖出交互", async () => {
+  const menuUrl = new URL("../src/components/files/RemoteFileContextMenu.jsx", import.meta.url);
+  const explorerUrl = new URL("../src/components/files/ExplorerPanel.jsx", import.meta.url);
+  const [menuSource, explorerSource] = await Promise.all([
+    readFile(menuUrl, "utf8"),
+    readFile(explorerUrl, "utf8"),
+  ]);
+
+  assert.match(menuSource, /下载到…/);
+  assert.doesNotMatch(menuSource, /拖到电脑|onPointerDown/);
+  assert.doesNotMatch(explorerSource, /DragOut|CachedDrag|拖向 Windows/);
 });
 
 test("Tauri 原生拖放事件只暴露受信任的路径 payload", async () => {

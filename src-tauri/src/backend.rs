@@ -1,22 +1,22 @@
 use crate::{
     command_history::{CommandHistoryStore, COMMAND_HISTORY_FILE},
     credentials::{CredentialRemoval, CredentialStatus, CredentialStore},
-    drag_out::{start_native_file_drag, NativeFileDragResult},
     error::{AppError, AppResult},
     monitor::{
         calculate_cpu_usage, calculate_network_rates, parse_counters, parse_snapshot,
         MonitorSnapshot, COUNTER_COMMAND, MONITOR_SNAPSHOT_COMMAND,
     },
     ssh::{
-        CachedDownload, CachedDownloadRelease, CompletionItem, ConnectResult, DirectoryListing,
-        DisconnectResult, RemoteEntryRemoval, RemoteEntryRename, SshConnection, SshManager,
-        TerminalAttachResult, TerminalDimensions, TransferSummary, UploadFile,
+        CompletionItem, ConnectResult, DirectoryListing, DisconnectResult, RemoteEntryRemoval,
+        RemoteEntryRename, SshConnection, SshManager, TerminalAttachResult, TerminalDimensions,
+        TransferSummary, UploadFile,
     },
     storage::{
         migrate_legacy_electron_data, validate_id, Connection, ConnectionDraft, ConnectionRemoval,
         ConnectionStore, KnownHostDraft, KnownHostsStore,
     },
 };
+use atomic_write_file::AtomicWriteFile;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::AppHandle;
-use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
+use tokio::sync::RwLock as AsyncRwLock;
 use uuid::Uuid;
 
 const CONNECTIONS_FILE: &str = "connections.json";
@@ -173,6 +173,15 @@ pub struct MonitorSample {
     pub sampled_at: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadedFile {
+    pub file_name: String,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<AppError>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitPreparation {
     Ready,
@@ -212,7 +221,6 @@ pub struct BackendState {
     known_hosts: KnownHostsStore,
     credentials: CredentialStore,
     ssh: SshManager,
-    cached_download_gate: AsyncMutex<()>,
     durable_data_gate: Mutex<()>,
     host_key_challenges: Mutex<HashMap<String, HostKeyChallenge>>,
     monitor_sampling: Arc<Mutex<HashSet<String>>>,
@@ -237,7 +245,6 @@ impl BackendState {
             known_hosts: KnownHostsStore::new(data_directory.join(KNOWN_HOSTS_FILE)),
             credentials,
             ssh: SshManager::new(app, data_directory.join(DOWNLOAD_CACHE_DIRECTORY))?,
-            cached_download_gate: AsyncMutex::new(()),
             durable_data_gate: Mutex::new(()),
             host_key_challenges: Mutex::new(HashMap::new()),
             monitor_sampling: Arc::new(Mutex::new(HashSet::new())),
@@ -554,59 +561,42 @@ impl BackendState {
             .await
     }
 
-    pub async fn download_file_to_cache(
+    pub async fn download_file_to_path(
         &self,
         session_id: &str,
         remote_path: &str,
-    ) -> AppResult<CachedDownload> {
+        target_path: PathBuf,
+    ) -> AppResult<DownloadedFile> {
         let _guard = self.operation_gate.read().await;
         self.ensure_operations_open()?;
-        self.ssh.download_to_cache(session_id, remote_path).await
-    }
-
-    pub async fn release_cached_download(
-        &self,
-        cache_id: &str,
-    ) -> AppResult<CachedDownloadRelease> {
-        let _guard = self.cached_download_gate.lock().await;
-        self.ssh.release_cached_download(cache_id).await
-    }
-
-    pub async fn start_cached_file_drag(
-        &self,
-        cache_id: &str,
-        app: AppHandle,
-    ) -> AppResult<NativeFileDragResult> {
-        let _operation_guard = self.operation_gate.read().await;
-        self.ensure_operations_open()?;
-        let _cache_guard = self.cached_download_gate.lock().await;
-        let (cached, canonical_path) = self.ssh.cached_download_for_drag(cache_id).await?;
-        let drag_result = start_native_file_drag(app, canonical_path).await;
+        let cached = self.ssh.download_to_cache(session_id, remote_path).await?;
+        let copy_result = async {
+            let canonical_path = self.ssh.cached_download_path(&cached.cache_id).await?;
+            copy_cached_download(canonical_path, target_path, cached.size).await
+        }
+        .await;
         let release_result = self.ssh.release_cached_download(&cached.cache_id).await;
 
-        match drag_result {
-            Ok(mut result) => {
-                match release_result {
-                    Ok(release) if release.released => result.cache_released = true,
-                    Ok(_) => {
-                        result.cleanup_error = Some(AppError::new(
-                            "DOWNLOAD_CACHE_CLEANUP_FAILED",
-                            "系统拖放已经结束，但对应下载缓存未能确认释放。",
-                        ));
-                    }
-                    Err(error) => result.cleanup_error = Some(error),
-                }
-                Ok(result)
-            }
-            Err(error) => {
-                if let Err(cleanup_error) = release_result {
-                    eprintln!(
-                        "[remote-terminal] cleanup native drag cache: {}",
-                        cleanup_error.code
-                    );
-                }
-                Err(error)
-            }
+        match copy_result {
+            Ok(()) => Ok(DownloadedFile {
+                file_name: cached.file_name,
+                size: cached.size,
+                cleanup_error: match release_result {
+                    Ok(release) if release.released => None,
+                    Ok(_) => Some(AppError::new(
+                        "DOWNLOAD_CACHE_CLEANUP_FAILED",
+                        "文件已下载，但无法确认临时缓存已经释放。",
+                    )),
+                    Err(error) => Some(error),
+                },
+            }),
+            Err(error) => match release_result {
+                Ok(_) => Err(error),
+                Err(cleanup_error) => Err(AppError::new(
+                    "DOWNLOAD_AND_CACHE_CLEANUP_FAILED",
+                    format!("{}；{}", error.message, cleanup_error.message),
+                )),
+            },
         }
     }
 
@@ -772,6 +762,120 @@ fn release_update_block(operation_block: &AtomicU8) -> bool {
             Ordering::SeqCst,
         )
         .is_ok()
+}
+
+async fn copy_cached_download(
+    source_path: PathBuf,
+    target_path: PathBuf,
+    expected_size: u64,
+) -> AppResult<()> {
+    tokio::task::spawn_blocking(move || {
+        validate_download_target(&target_path)?;
+        let mut source = std::fs::File::open(&source_path).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_CACHE_READ_FAILED",
+                "无法打开已经校验的下载临时缓存。",
+            )
+        })?;
+        let source_metadata = source.metadata().map_err(|_| {
+            AppError::new("DOWNLOAD_CACHE_READ_FAILED", "无法再次校验下载临时缓存。")
+        })?;
+        if !source_metadata.is_file() || source_metadata.len() != expected_size {
+            return Err(AppError::new(
+                "DOWNLOAD_CACHE_VERIFY_FAILED",
+                "下载临时缓存状态已经变化，已拒绝保存。",
+            ));
+        }
+
+        let mut target = AtomicWriteFile::open(&target_path).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_TARGET_CREATE_FAILED",
+                "无法在所选位置创建下载文件，请检查目录权限。",
+            )
+        })?;
+        let copied = std::io::copy(&mut source, &mut target).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_TARGET_WRITE_FAILED",
+                "无法把远程文件写入所选位置。",
+            )
+        })?;
+        if copied != expected_size {
+            return Err(AppError::new(
+                "DOWNLOAD_TARGET_VERIFY_FAILED",
+                "写入所选位置的文件大小不完整，原文件保持不变。",
+            ));
+        }
+        target.commit().map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_TARGET_COMMIT_FAILED",
+                "文件已下载，但无法原子保存到所选位置。",
+            )
+        })?;
+        let target_metadata = std::fs::symlink_metadata(&target_path).map_err(|_| {
+            AppError::new(
+                "DOWNLOAD_TARGET_VERIFY_FAILED",
+                "无法校验保存后的本地文件。",
+            )
+        })?;
+        if !target_metadata.is_file() || target_metadata.len() != expected_size {
+            return Err(AppError::new(
+                "DOWNLOAD_TARGET_VERIFY_FAILED",
+                "保存后的本地文件校验失败。",
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| AppError::new("DOWNLOAD_WORKER_FAILED", "本地下载保存任务异常终止。"))?
+}
+
+fn validate_download_target(path: &Path) -> AppResult<()> {
+    let value = path.to_str().ok_or_else(|| {
+        AppError::new(
+            "DOWNLOAD_TARGET_INVALID",
+            "所选下载路径不是有效的 Unicode Windows 路径。",
+        )
+    })?;
+    if !path.is_absolute()
+        || value.encode_utf16().count() > 32_767
+        || value.chars().any(char::is_control)
+        || path.file_name().is_none()
+    {
+        return Err(AppError::new(
+            "DOWNLOAD_TARGET_INVALID",
+            "所选下载位置不是有效的 Windows 文件路径。",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        AppError::new(
+            "DOWNLOAD_TARGET_INVALID",
+            "所选下载位置没有有效的上级目录。",
+        )
+    })?;
+    let parent_metadata = std::fs::metadata(parent).map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_TARGET_DIRECTORY_UNAVAILABLE",
+            "所选下载目录不存在或当前不可用。",
+        )
+    })?;
+    if !parent_metadata.is_dir() {
+        return Err(AppError::new(
+            "DOWNLOAD_TARGET_DIRECTORY_INVALID",
+            "所选下载位置的上级路径不是目录。",
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Err(AppError::new(
+            "DOWNLOAD_TARGET_IS_DIRECTORY",
+            "所选下载位置是目录，不能作为文件保存。",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AppError::new(
+            "DOWNLOAD_TARGET_UNAVAILABLE",
+            "无法读取所选下载位置的当前状态。",
+        )),
+    }
 }
 
 fn ensure_data_directory_idle(
@@ -943,6 +1047,27 @@ mod tests {
                 active_session_count: 1,
                 active_transfer_count: 3,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_download_copy_atomically_replaces_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("cache.bin");
+        let target = directory.path().join("download.bin");
+        std::fs::write(&source, b"new remote bytes").unwrap();
+        std::fs::write(&target, b"old local bytes").unwrap();
+
+        copy_cached_download(source, target.clone(), 16)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(target).unwrap(), b"new remote bytes");
+        assert_eq!(
+            validate_download_target(Path::new("relative.bin"))
+                .unwrap_err()
+                .code,
+            "DOWNLOAD_TARGET_INVALID"
         );
     }
 }

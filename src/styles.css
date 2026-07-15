@@ -1964,44 +1964,10 @@ progress::-webkit-progress-value {
 }
 
 .native-file-row {
-  grid-template-columns: 16px 20px minmax(0, 1fr) auto 28px;
+  grid-template-columns: 16px 20px minmax(0, 1fr) auto;
 }
 
-.native-file-row__drag-out {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: var(--text-muted);
-  background: transparent;
-  cursor: pointer;
-}
-
-.native-file-row__drag-out:hover,
-.native-file-row__drag-out:focus-visible,
-.native-file-row__drag-out.is-ready {
-  border-color: color-mix(in srgb, var(--accent), transparent 52%);
-  color: var(--accent-hover);
-  background: color-mix(in srgb, var(--accent), transparent 88%);
-}
-
-.native-file-row__drag-out.is-ready {
-  cursor: grab;
-}
-
-.native-file-row__drag-out.is-ready:active {
-  cursor: grabbing;
-}
-
-.native-file-row__drag-out:disabled {
-  opacity: 0.65;
-  cursor: wait;
-}
-
-.file-tree__drag-status {
+.file-tree__download-status {
   display: flex;
   flex: 0 0 auto;
   gap: 7px;
@@ -2017,18 +1983,17 @@ progress::-webkit-progress-value {
   line-height: 1.45;
 }
 
-.file-tree__drag-status > svg {
+.file-tree__download-status > svg {
   flex: 0 0 auto;
   margin-top: 1px;
 }
 
-.file-tree__drag-status.is-ready,
-.file-tree__drag-status.is-done {
+.file-tree__download-status.is-done {
   color: var(--success);
   border-color: color-mix(in srgb, var(--success), transparent 62%);
 }
 
-.file-tree__drag-status.is-error {
+.file-tree__download-status.is-error {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger), transparent 62%);
 }

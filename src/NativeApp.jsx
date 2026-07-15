@@ -837,21 +837,32 @@ export function NativeApp() {
     }
   }
 
-  async function prepareRemoteFileDrag(remotePath) {
+  async function downloadRemoteFile(remotePath) {
     const connectionId = activeConnectionIdRef.current;
     const workspace = connectionId ? workspacesRef.current[connectionId] : null;
     if (!connectionId || !workspace?.sessionId) {
       throw new Error("当前工作区没有可用的 SFTP 会话。");
     }
-    return client.sftp.downloadToCache(workspace.sessionId, remotePath);
-  }
-
-  function startRemoteFileDrag(cacheId) {
-    return client.sftp.startCachedDrag(cacheId);
-  }
-
-  function releaseRemoteFileDrag(cacheId) {
-    return client.sftp.releaseCachedDownload(cacheId);
+    try {
+      const result = await client.sftp.downloadToComputer(workspace.sessionId, remotePath);
+      if (result?.cleanupError) {
+        addIssue(
+          connectionId,
+          "文件已下载，但临时缓存未清理",
+          result.cleanupError.message,
+          result.cleanupError.code,
+        );
+      }
+      return result;
+    } catch (error) {
+      addIssue(
+        connectionId,
+        "下载远程文件失败",
+        error?.message || "无法下载远程文件。",
+        error?.code || "SFTP_DOWNLOAD_FAILED",
+      );
+      throw error;
+    }
   }
 
   async function deleteRemoteEntry(remotePath, expectedEntryType) {
@@ -976,15 +987,7 @@ export function NativeApp() {
             onUpload={uploadFiles}
             onSelectUploadFiles={selectUploadFiles}
             onNativeDragDropSubscribe={client.events.onDragDrop}
-            onPrepareDragOut={prepareRemoteFileDrag}
-            onStartDragOut={startRemoteFileDrag}
-            onReleaseDragOut={releaseRemoteFileDrag}
-            onDragOutError={(error) => activeConnectionId && addIssue(
-              activeConnectionId,
-              "无法把远程文件拖到电脑",
-              error?.message || "远程文件拖出失败。",
-              error?.code || "SFTP_DRAG_OUT_FAILED",
-            )}
+            onDownloadRemoteFile={downloadRemoteFile}
             onRenameRemoteEntry={renameRemoteEntry}
             onDeleteRemoteEntry={deleteRemoteEntry}
             onRefresh={() => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory)}

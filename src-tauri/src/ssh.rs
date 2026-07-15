@@ -1041,10 +1041,7 @@ impl SshManager {
         Ok(cached)
     }
 
-    pub async fn cached_download_for_drag(
-        &self,
-        cache_id: &str,
-    ) -> AppResult<(CachedDownload, PathBuf)> {
+    pub async fn cached_download_path(&self, cache_id: &str) -> AppResult<PathBuf> {
         let id = validate_id(cache_id, "下载缓存标识")?;
         let cached = self
             .inner
@@ -1059,10 +1056,7 @@ impl SshManager {
                     "下载缓存不存在或已经释放，请重新准备远程文件。",
                 )
             })?;
-        let canonical_path =
-            validate_cached_download_for_drag(&self.inner.download_cache_directory, &cached)
-                .await?;
-        Ok((cached, canonical_path))
+        validate_cached_download(&self.inner.download_cache_directory, &cached).await
     }
 
     /// Releases only a cache entry returned by this process. Unknown IDs are
@@ -2443,6 +2437,11 @@ fn cleanup_stale_download_cache(directory: &Path) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) fn download_file_name_for_dialog(remote_path: &str) -> AppResult<String> {
+    let normalized = normalize_remote_path(remote_path)?;
+    download_file_name(&normalized)
+}
+
 fn download_file_name(remote_path: &str) -> AppResult<String> {
     let name = remote_path
         .rsplit('/')
@@ -2665,10 +2664,7 @@ async fn cleanup_download_cache_paths(paths: &DownloadCachePaths) -> AppResult<(
     }
 }
 
-async fn validate_cached_download_for_drag(
-    root: &Path,
-    cached: &CachedDownload,
-) -> AppResult<PathBuf> {
+async fn validate_cached_download(root: &Path, cached: &CachedDownload) -> AppResult<PathBuf> {
     validate_download_cache_directory(root)?;
     let (directory, completed) = cached_download_paths(root, cached)?;
     let directory_metadata = tokio::fs::symlink_metadata(&directory).await.map_err(|_| {
@@ -2680,7 +2676,7 @@ async fn validate_cached_download_for_drag(
     if !directory_metadata.is_dir() || is_local_reparse_point(&directory_metadata) {
         return Err(AppError::new(
             "DOWNLOAD_CACHE_STATE_INVALID",
-            "下载缓存目录已被替换，已拒绝启动系统拖放。",
+            "下载缓存目录已被替换，已拒绝继续保存。",
         ));
     }
     validate_local_cached_file(&completed, cached.size).await?;
@@ -3091,6 +3087,10 @@ mod tests {
     #[test]
     fn download_cache_requires_windows_safe_file_names_and_reliable_metadata() {
         assert_eq!(download_file_name("/var/log/app.log").unwrap(), "app.log");
+        assert_eq!(
+            download_file_name_for_dialog("/var//log/./app.log").unwrap(),
+            "app.log"
+        );
         assert_eq!(download_file_name("/var/log/abé").unwrap(), "abé");
         for path in [
             "/var/log/CON",
@@ -3159,7 +3159,7 @@ mod tests {
             "WebView must not receive the Rust-owned cache path"
         );
         assert_eq!(
-            validate_cached_download_for_drag(&cache_root, &cached)
+            validate_cached_download(&cache_root, &cached)
                 .await
                 .unwrap(),
             tokio::fs::canonicalize(&paths.completed).await.unwrap()
@@ -3167,7 +3167,7 @@ mod tests {
         let mut tampered = cached.clone();
         tampered.local_path = root.path().join("outside.log").display().to_string();
         assert_eq!(
-            validate_cached_download_for_drag(&cache_root, &tampered)
+            validate_cached_download(&cache_root, &tampered)
                 .await
                 .unwrap_err()
                 .code,

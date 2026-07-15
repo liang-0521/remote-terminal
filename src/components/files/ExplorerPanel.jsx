@@ -15,7 +15,7 @@ import { RemoteDeleteDialog } from "./RemoteDeleteDialog.jsx";
 import { RemoteFileContextMenu } from "./RemoteFileContextMenu.jsx";
 import { RemoteRenameDialog } from "./RemoteRenameDialog.jsx";
 
-export function ExplorerPanel({ mode, server, servers, activeServerId, fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onPrepareDragOut, onStartDragOut, onReleaseDragOut, onDragOutError, onRenameRemoteEntry, onDeleteRemoteEntry, onRefresh, onNavigate, onOpenBottomTab, onCreateSession, onSelectServer, onOpenConnections }) {
+export function ExplorerPanel({ mode, server, servers, activeServerId, fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onDownloadRemoteFile, onRenameRemoteEntry, onDeleteRemoteEntry, onRefresh, onNavigate, onOpenBottomTab, onCreateSession, onSelectServer, onOpenConnections }) {
   if (mode === "connections") {
     return <ConnectionsPanel servers={servers} activeServerId={activeServerId} onSelectServer={onSelectServer} onOpenConnections={onOpenConnections} />;
   }
@@ -23,36 +23,24 @@ export function ExplorerPanel({ mode, server, servers, activeServerId, fileState
     return <ContextPanel mode={mode} server={server} onOpenBottomTab={onOpenBottomTab} onCreateSession={onCreateSession} />;
   }
 
-  return <RemoteFiles fileState={fileState} onUpload={onUpload} onSelectUploadFiles={onSelectUploadFiles} onNativeDragDropSubscribe={onNativeDragDropSubscribe} onPrepareDragOut={onPrepareDragOut} onStartDragOut={onStartDragOut} onReleaseDragOut={onReleaseDragOut} onDragOutError={onDragOutError} onRenameRemoteEntry={onRenameRemoteEntry} onDeleteRemoteEntry={onDeleteRemoteEntry} onRefresh={onRefresh} onNavigate={onNavigate} />;
+  return <RemoteFiles fileState={fileState} onUpload={onUpload} onSelectUploadFiles={onSelectUploadFiles} onNativeDragDropSubscribe={onNativeDragDropSubscribe} onDownloadRemoteFile={onDownloadRemoteFile} onRenameRemoteEntry={onRenameRemoteEntry} onDeleteRemoteEntry={onDeleteRemoteEntry} onRefresh={onRefresh} onNavigate={onNavigate} />;
 }
 
-function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onPrepareDragOut, onStartDragOut, onReleaseDragOut, onDragOutError, onRenameRemoteEntry, onDeleteRemoteEntry, onRefresh, onNavigate }) {
+function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onDownloadRemoteFile, onRenameRemoteEntry, onDeleteRemoteEntry, onRefresh, onNavigate }) {
   const shellRef = useRef(null);
   const uploadRef = useRef(onUpload);
   const fileRowRefs = useRef([]);
-  const preparedDragRef = useRef(null);
-  const dragRequestRef = useRef(0);
-  const releaseDragRef = useRef(onReleaseDragOut);
+  const downloadRequestRef = useRef(0);
   const [dragging, setDragging] = useState(false);
-  const [dragOutState, setDragOutState] = useState({ key: "", phase: "idle", message: "" });
+  const [downloadState, setDownloadState] = useState({ key: "", phase: "idle", message: "" });
   const [contextMenu, setContextMenu] = useState(null);
   const [deleteRequest, setDeleteRequest] = useState(null);
   const [renameRequest, setRenameRequest] = useState(null);
   const [focusedFileRow, setFocusedFileRow] = useState(0);
   uploadRef.current = onUpload;
-  releaseDragRef.current = onReleaseDragOut;
-
-  function releaseCachedDrag(cacheId) {
-    return Promise.resolve()
-      .then(() => releaseDragRef.current?.(cacheId))
-      .catch(() => undefined);
-  }
 
   useEffect(() => () => {
-    dragRequestRef.current += 1;
-    const prepared = preparedDragRef.current;
-    preparedDragRef.current = null;
-    if (prepared?.cacheId) void releaseCachedDrag(prepared.cacheId);
+    downloadRequestRef.current += 1;
   }, []);
 
   useEffect(() => {
@@ -136,72 +124,30 @@ function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDro
   }, [rows.length]);
 
   useEffect(() => {
-    dragRequestRef.current += 1;
-    const prepared = preparedDragRef.current;
-    preparedDragRef.current = null;
-    if (prepared?.cacheId) void releaseCachedDrag(prepared.cacheId);
-    setDragOutState({ key: "", phase: "idle", message: "" });
+    downloadRequestRef.current += 1;
+    setDownloadState({ key: "", phase: "idle", message: "" });
     setContextMenu(null);
     setDeleteRequest(null);
     setRenameRequest(null);
   }, [currentPath]);
 
-  async function prepareDragOut(key, entry, remotePath) {
-    if (entry.type !== "file" || dragOutState.phase === "preparing" || dragOutState.phase === "dragging") return;
-    const requestId = dragRequestRef.current + 1;
-    dragRequestRef.current = requestId;
-    const previous = preparedDragRef.current;
-    preparedDragRef.current = null;
-    if (previous?.cacheId) await releaseCachedDrag(previous.cacheId);
-    setDragOutState({ key, phase: "preparing", message: `正在准备 ${entry.name}，完成后可从右键菜单按住并拖到电脑。` });
+  async function downloadRemoteFile(key, entry, remotePath) {
+    if (entry.type !== "file" || downloadState.phase === "downloading") return;
+    const requestId = downloadRequestRef.current + 1;
+    downloadRequestRef.current = requestId;
+    setDownloadState({ key, phase: "downloading", message: `正在下载 ${entry.name}…` });
     try {
-      const cached = await onPrepareDragOut?.(remotePath);
-      if (!cached?.cacheId) throw new Error("原生下载缓存没有返回有效标识。");
-      if (dragRequestRef.current !== requestId) {
-        await releaseCachedDrag(cached.cacheId);
-        return;
-      }
-      preparedDragRef.current = { cacheId: cached.cacheId, key, fileName: entry.name };
-      setDragOutState({ key, phase: "ready", message: `${entry.name} 已准备好，请在右键菜单按住“拖到电脑”并拖向 Windows 文件夹。` });
-    } catch (error) {
-      if (dragRequestRef.current !== requestId) return;
-      setDragOutState({ key, phase: "error", message: error?.message || `无法准备 ${entry.name}。` });
-      onDragOutError?.(error);
-    }
-  }
-
-  async function startPreparedDrag(event, key, entry) {
-    const prepared = preparedDragRef.current;
-    if (event.button !== 0 || !prepared || prepared.key !== key || dragOutState.phase !== "ready") return;
-    event.preventDefault();
-    setContextMenu(null);
-    preparedDragRef.current = null;
-    setDragOutState({ key, phase: "dragging", message: `正在拖出 ${entry.name}，请释放到 Windows 文件夹。` });
-    try {
-      const result = await onStartDragOut?.(prepared.cacheId);
-      if (result?.cleanupError) {
-        const cleanupError = result.cleanupError;
-        await releaseCachedDrag(prepared.cacheId);
-        setDragOutState({ key, phase: "error", message: cleanupError.message || "拖放结束，但下载缓存清理失败。" });
-        onDragOutError?.(cleanupError);
-        return;
-      }
-      const dropped = result?.outcome === "dropped";
-      setDragOutState({
+      const result = await onDownloadRemoteFile?.(remotePath);
+      if (downloadRequestRef.current !== requestId) return;
+      setDownloadState({
         key,
-        phase: dropped ? "done" : "cancelled",
-        message: dropped ? `${entry.name} 已复制到电脑。` : `已取消拖出 ${entry.name}。`,
+        phase: result ? "done" : "cancelled",
+        message: result ? `${entry.name} 已下载到所选位置。` : `已取消下载 ${entry.name}。`,
       });
     } catch (error) {
-      await releaseCachedDrag(prepared.cacheId);
-      setDragOutState({ key, phase: "error", message: error?.message || `无法拖出 ${entry.name}。` });
-      onDragOutError?.(error);
+      if (downloadRequestRef.current !== requestId) return;
+      setDownloadState({ key, phase: "error", message: error?.message || `无法下载 ${entry.name}。` });
     }
-  }
-
-  function prepareContextDownload(key, entry, remotePath) {
-    if (dragOutState.key === key && dragOutState.phase === "ready") return;
-    void prepareDragOut(key, entry, remotePath);
   }
 
   function openContextMenu(event, request) {
@@ -218,26 +164,12 @@ function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDro
 
   async function confirmRemoteDelete(request) {
     await onDeleteRemoteEntry?.(request.remotePath, request.entry.type);
-    if (preparedDragRef.current?.key === request.key) {
-      const prepared = preparedDragRef.current;
-      preparedDragRef.current = null;
-      dragRequestRef.current += 1;
-      if (prepared.cacheId) await releaseCachedDrag(prepared.cacheId);
-      setDragOutState({ key: "", phase: "idle", message: "" });
-    }
     setDeleteRequest(null);
     onRefresh?.();
   }
 
   async function confirmRemoteRename(request) {
     await onRenameRemoteEntry?.(request.remotePath, request.targetPath, request.entry.type);
-    if (preparedDragRef.current?.key === request.key) {
-      const prepared = preparedDragRef.current;
-      preparedDragRef.current = null;
-      dragRequestRef.current += 1;
-      if (prepared.cacheId) await releaseCachedDrag(prepared.cacheId);
-      setDragOutState({ key: "", phase: "idle", message: "" });
-    }
     setRenameRequest(null);
     onRefresh?.();
   }
@@ -310,20 +242,19 @@ function RemoteFiles({ fileState, onUpload, onSelectUploadFiles, onNativeDragDro
           </div>
         )}
       </div>
-      {dragOutState.message && (
-        <div className={`file-tree__drag-status is-${dragOutState.phase}`} role="status">
-          {dragOutState.phase === "preparing" && <CircleNotch size={14} className="is-spinning" />}
-          <span>{dragOutState.message}</span>
+      {downloadState.message && (
+        <div className={`file-tree__download-status is-${downloadState.phase}`} role="status">
+          {downloadState.phase === "downloading" && <CircleNotch size={14} className="is-spinning" />}
+          <span>{downloadState.message}</span>
         </div>
       )}
       <span className="file-tree__status" role="status" aria-live="polite" aria-atomic="true">{liveStatus}</span>
       <RemoteFileContextMenu
         request={contextMenu}
-        dragPhase={contextMenu && dragOutState.key === contextMenu.key ? dragOutState.phase : "idle"}
+        downloading={downloadState.phase === "downloading"}
         onClose={() => setContextMenu(null)}
         onOpen={contextMenu?.onOpen}
-        onPrepareDownload={() => contextMenu && prepareContextDownload(contextMenu.key, contextMenu.entry, contextMenu.remotePath)}
-        onStartDownloadDrag={(event) => contextMenu && void startPreparedDrag(event, contextMenu.key, contextMenu.entry)}
+        onDownload={() => contextMenu && void downloadRemoteFile(contextMenu.key, contextMenu.entry, contextMenu.remotePath)}
         onRename={() => contextMenu && setRenameRequest(contextMenu)}
         onDelete={() => contextMenu && setDeleteRequest(contextMenu)}
         onRefresh={onRefresh}

@@ -1,15 +1,14 @@
 use crate::{
     backend::{
-        BackendState, BackendStatus, ConnectionView, HostKeyAcceptResult, HostKeyProbeResult,
-        MonitorSample, SshConnectPayload, SshConnectResponse,
+        BackendState, BackendStatus, ConnectionView, DownloadedFile, HostKeyAcceptResult,
+        HostKeyProbeResult, MonitorSample, SshConnectPayload, SshConnectResponse,
     },
     credentials::{CredentialRemoval, CredentialStatus},
     data_directory::{migrate_data_directory, paths_equivalent, validate_selected_data_directory},
-    drag_out::NativeFileDragResult,
     error::{AppError, AppResult},
     lifecycle,
     ssh::{
-        CachedDownload, CachedDownloadRelease, CompletionItem, DirectoryListing, DisconnectResult,
+        download_file_name_for_dialog, CompletionItem, DirectoryListing, DisconnectResult,
         RemoteEntryRemoval, RemoteEntryRename, TerminalAttachResult, TerminalDimensions,
         TransferSummary, UploadFile,
     },
@@ -18,6 +17,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::UpdaterExt;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -341,31 +341,34 @@ pub async fn sftp_upload(
 }
 
 #[tauri::command]
-pub async fn sftp_download_to_cache(
+pub async fn sftp_download_to_computer(
     session_id: String,
     remote_path: String,
-    state: State<'_, BackendState>,
-) -> AppResult<CachedDownload> {
-    state
-        .download_file_to_cache(&session_id, &remote_path)
-        .await
-}
-
-#[tauri::command]
-pub async fn sftp_release_cached_download(
-    cache_id: String,
-    state: State<'_, BackendState>,
-) -> AppResult<CachedDownloadRelease> {
-    state.release_cached_download(&cache_id).await
-}
-
-#[tauri::command]
-pub async fn sftp_start_cached_drag(
-    cache_id: String,
     app: AppHandle,
     state: State<'_, BackendState>,
-) -> AppResult<NativeFileDragResult> {
-    state.start_cached_file_drag(&cache_id, app).await
+) -> AppResult<Option<DownloadedFile>> {
+    let file_name = download_file_name_for_dialog(&remote_path)?;
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("下载到")
+        .set_file_name(file_name);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let Some(target_path) = dialog.blocking_save_file() else {
+        return Ok(None);
+    };
+    let target_path = target_path.into_path().map_err(|_| {
+        AppError::new(
+            "DOWNLOAD_TARGET_INVALID",
+            "系统保存窗口返回了无法识别的本地文件路径。",
+        )
+    })?;
+    state
+        .download_file_to_path(&session_id, &remote_path, target_path)
+        .await
+        .map(Some)
 }
 
 #[tauri::command]

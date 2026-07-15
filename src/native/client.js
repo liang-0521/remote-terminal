@@ -31,9 +31,7 @@ const TAURI_COMMANDS = Object.freeze({
   sftpRemove: "sftp_remove",
   sftpRename: "sftp_rename",
   sftpUpload: "sftp_upload",
-  sftpDownloadToCache: "sftp_download_to_cache",
-  sftpReleaseCachedDownload: "sftp_release_cached_download",
-  sftpStartCachedDrag: "sftp_start_cached_drag",
+  sftpDownloadToComputer: "sftp_download_to_computer",
   sftpCancel: "sftp_cancel",
   sftpRetry: "sftp_retry",
   monitorSample: "monitor_sample",
@@ -499,14 +497,8 @@ function createTauriClient(api) {
         const preparedFiles = prepareTauriFiles(files);
         return call(TAURI_COMMANDS.sftpUpload, { sessionId, remoteDirectory, files: preparedFiles });
       },
-      downloadToCache: (sessionId, remotePath) => (
-        call(TAURI_COMMANDS.sftpDownloadToCache, { sessionId, remotePath })
-      ),
-      releaseCachedDownload: (cacheId) => (
-        call(TAURI_COMMANDS.sftpReleaseCachedDownload, { cacheId })
-      ),
-      startCachedDrag: (cacheId) => (
-        call(TAURI_COMMANDS.sftpStartCachedDrag, { cacheId })
+      downloadToComputer: (sessionId, remotePath) => (
+        call(TAURI_COMMANDS.sftpDownloadToComputer, { sessionId, remotePath })
       ),
       cancel: (transferId) => call(TAURI_COMMANDS.sftpCancel, { transferId }),
       retry: (transferId) => call(TAURI_COMMANDS.sftpRetry, { transferId }),
