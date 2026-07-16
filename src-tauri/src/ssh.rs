@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::SeekFrom,
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
@@ -26,7 +27,7 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, Notify, RwLock, Semaphore},
     time::timeout,
 };
@@ -46,6 +47,8 @@ const MAX_REMOTE_PATH_LENGTH: usize = 4096;
 const MAX_WINDOWS_FILE_NAME_UTF16: usize = 255;
 const MAX_COMPLETION_COMMANDS: usize = 10_000;
 const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
+const REMOTE_TEXT_READ_LIMIT: u64 = 1024 * 1024;
+const REMOTE_TEXT_WRITE_LIMIT: usize = 2 * 1024 * 1024;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 const COMMANDS_MARKER: &str = "@@REMOTE_TERMINAL:COMMANDS@@";
@@ -207,6 +210,7 @@ struct Transfer {
     local_path: Option<PathBuf>,
     file_name: String,
     target: String,
+    overwrite: bool,
     temporary_path: Option<String>,
     size: u64,
     transferred: u64,
@@ -294,6 +298,8 @@ impl From<&Transfer> for TransferSummary {
 #[serde(rename_all = "camelCase")]
 pub struct UploadFile {
     pub local_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -336,6 +342,31 @@ pub struct DirectoryEntry {
     pub entry_type: String,
     pub size: u64,
     pub modified_at: Option<String>,
+    pub permissions: String,
+    pub owner: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTextChunk {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub modified_at: Option<String>,
+    pub truncated: bool,
+    pub reset: bool,
+    pub encoding_lossy: bool,
+    pub editable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTextWriteResult {
+    pub path: String,
+    pub size: u64,
+    pub modified_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -350,6 +381,13 @@ pub struct RemoteEntryRemoval {
 pub struct RemoteEntryRename {
     pub source_path: String,
     pub target_path: String,
+    pub entry_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEntryCreation {
+    pub path: String,
     pub entry_type: String,
 }
 
@@ -839,12 +877,192 @@ impl SshManager {
                 entry_type: entry_type.to_string(),
                 size: metadata.len(),
                 modified_at: system_time_to_iso(metadata.modified().ok()),
+                permissions: format_remote_permissions(&metadata),
+                owner: format_remote_owner(&metadata),
             });
         }
         sort_directory_entries(&mut entries);
         Ok(DirectoryListing {
             path: directory,
             entries,
+        })
+    }
+
+    /// Reads a bounded UTF-8 text window. Initial reads tail files larger than
+    /// one MiB; follow-up reads start at the caller's last byte offset so a
+    /// growing log never requires downloading the full file again.
+    pub async fn read_remote_text(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        offset: Option<u64>,
+    ) -> AppResult<RemoteTextChunk> {
+        let session = self.session(session_id).await?;
+        let path = normalize_remote_path(remote_path)?;
+        let sftp = self.get_sftp(&session).await?;
+        let metadata = sftp.symlink_metadata(path.clone()).await.map_err(|error| {
+            if sftp_not_found(&error) {
+                AppError::new("REMOTE_ENTRY_NOT_FOUND", "远程文件已经不存在，请刷新目录。")
+            } else {
+                AppError::new(
+                    "SFTP_TEXT_STAT_FAILED",
+                    "无法读取远程文本文件信息，请检查路径和权限。",
+                )
+            }
+        })?;
+        if metadata.file_type() != FileType::File {
+            return Err(AppError::new(
+                "SFTP_TEXT_NOT_FILE",
+                "只能预览普通远程文件，目录、符号链接和设备文件暂不支持。",
+            ));
+        }
+        let size = metadata.size.ok_or_else(|| {
+            AppError::new(
+                "SFTP_TEXT_SIZE_UNKNOWN",
+                "服务器没有返回可靠的远程文件大小。",
+            )
+        })?;
+        let reset = offset.is_some_and(|requested| requested > size);
+        let start = match offset {
+            Some(requested) if requested <= size => requested,
+            _ => size.saturating_sub(REMOTE_TEXT_READ_LIMIT),
+        };
+        let read_limit = size.saturating_sub(start).min(REMOTE_TEXT_READ_LIMIT);
+        let mut remote_file = sftp.open(path.clone()).await.map_err(|_| {
+            AppError::new(
+                "SFTP_TEXT_OPEN_FAILED",
+                "无法打开远程文本文件，请检查路径和权限。",
+            )
+        })?;
+        if start > 0 {
+            remote_file
+                .seek(SeekFrom::Start(start))
+                .await
+                .map_err(|_| {
+                    AppError::new("SFTP_TEXT_SEEK_FAILED", "无法定位远程文本文件的读取位置。")
+                })?;
+        }
+        let mut bytes = Vec::with_capacity(read_limit as usize);
+        remote_file
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| AppError::new("SFTP_TEXT_READ_FAILED", "读取远程文本文件失败。"))?;
+        if bytes.contains(&0) {
+            return Err(AppError::new(
+                "REMOTE_FILE_NOT_TEXT",
+                "该文件包含二进制内容，不能作为文本预览。",
+            ));
+        }
+        let byte_count = bytes.len() as u64;
+        let (content, encoding_lossy) = match String::from_utf8(bytes) {
+            Ok(content) => (content, false),
+            Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
+        };
+        let truncated = start > 0;
+        Ok(RemoteTextChunk {
+            path,
+            content,
+            size,
+            offset: start,
+            next_offset: start.saturating_add(byte_count),
+            modified_at: system_time_to_iso(metadata.modified().ok()),
+            truncated,
+            reset,
+            encoding_lossy,
+            editable: !truncated && !encoding_lossy && size <= REMOTE_TEXT_WRITE_LIMIT as u64,
+        })
+    }
+
+    /// Writes only a complete, bounded text document whose size and mtime still
+    /// match the preview revision. Growing logs therefore fail closed instead
+    /// of silently discarding bytes appended after the editor was opened.
+    pub async fn write_remote_text(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        content: &str,
+        expected_size: u64,
+        expected_modified_at: Option<&str>,
+    ) -> AppResult<RemoteTextWriteResult> {
+        if content.len() > REMOTE_TEXT_WRITE_LIMIT || content.contains('\0') {
+            return Err(AppError::new(
+                "REMOTE_TEXT_WRITE_LIMIT",
+                "文本内容必须小于 2 MiB，且不能包含空字节。",
+            ));
+        }
+        let session = self.session(session_id).await?;
+        let path = normalize_remote_path(remote_path)?;
+        let sftp = self.get_sftp(&session).await?;
+        let metadata = sftp.symlink_metadata(path.clone()).await.map_err(|error| {
+            if sftp_not_found(&error) {
+                AppError::new("REMOTE_ENTRY_NOT_FOUND", "远程文件已经不存在，不能保存。")
+            } else {
+                AppError::new("SFTP_TEXT_STAT_FAILED", "保存前无法校验远程文件状态。")
+            }
+        })?;
+        if metadata.file_type() != FileType::File {
+            return Err(AppError::new(
+                "SFTP_TEXT_NOT_FILE",
+                "远程条目已不再是普通文件，不能保存。",
+            ));
+        }
+        let current_size = metadata.size.ok_or_else(|| {
+            AppError::new(
+                "SFTP_TEXT_SIZE_UNKNOWN",
+                "服务器没有返回可靠的远程文件大小。",
+            )
+        })?;
+        let current_modified_at = system_time_to_iso(metadata.modified().ok());
+        if current_size != expected_size
+            || expected_modified_at
+                .is_some_and(|expected| current_modified_at.as_deref() != Some(expected))
+        {
+            return Err(AppError::new(
+                "REMOTE_FILE_CHANGED",
+                "远程文件已在编辑期间变化；为避免覆盖新增内容，本次保存已取消。",
+            ));
+        }
+
+        let mut remote_file = sftp
+            .open_with_flags(path.clone(), OpenFlags::WRITE | OpenFlags::TRUNCATE)
+            .await
+            .map_err(|_| {
+                AppError::new("SFTP_TEXT_WRITE_FAILED", "无法以写入方式打开远程文本文件。")
+            })?;
+        remote_file
+            .write_all(content.as_bytes())
+            .await
+            .map_err(|_| AppError::new("SFTP_TEXT_WRITE_FAILED", "写入远程文本文件失败。"))?;
+        remote_file
+            .flush()
+            .await
+            .map_err(|_| AppError::new("SFTP_TEXT_WRITE_FAILED", "刷新远程文本文件失败。"))?;
+        remote_file
+            .sync_all()
+            .await
+            .map_err(|_| AppError::new("SFTP_TEXT_WRITE_FAILED", "同步远程文本文件失败。"))?;
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|_| AppError::new("SFTP_TEXT_WRITE_FAILED", "关闭远程文本文件失败。"))?;
+        let saved = sftp.symlink_metadata(path.clone()).await.map_err(|_| {
+            AppError::new(
+                "SFTP_TEXT_VERIFY_FAILED",
+                "文本已写入，但无法校验远程文件状态。",
+            )
+        })?;
+        let saved_size = saved.size.unwrap_or(u64::MAX);
+        if saved_size != content.len() as u64 {
+            return Err(AppError::new(
+                "SFTP_TEXT_VERIFY_FAILED",
+                "远程文本文件写入后的大小校验失败。",
+            ));
+        }
+        Ok(RemoteTextWriteResult {
+            path,
+            size: saved_size,
+            modified_at: system_time_to_iso(saved.modified().ok()),
         })
     }
 
@@ -970,6 +1188,61 @@ impl SshManager {
             source_path: source,
             target_path: target,
             entry_type: actual_entry_type.to_string(),
+        })
+    }
+
+    pub async fn create_remote_entry(
+        &self,
+        session_id: &str,
+        directory: &str,
+        name: &str,
+        entry_type: &str,
+    ) -> AppResult<RemoteEntryCreation> {
+        let session = self.session(session_id).await?;
+        let directory = normalize_remote_path(directory)?;
+        validate_file_name(name)?;
+        let path = join_remote_path(&directory, name);
+        let sftp = self.get_sftp(&session).await?;
+        assert_remote_rename_parent_directory(&sftp, &path).await?;
+        assert_remote_rename_target_missing(&sftp, &path).await?;
+        match entry_type {
+            "file" => {
+                let mut file = sftp
+                    .open_with_flags_and_attributes(
+                        path.clone(),
+                        OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                        FileAttributes::empty(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        AppError::new(
+                            "SFTP_CREATE_FILE_FAILED",
+                            "无法创建远程文件，请检查目录权限。",
+                        )
+                    })?;
+                file.shutdown().await.map_err(|_| {
+                    AppError::new(
+                        "SFTP_CREATE_FILE_FAILED",
+                        "远程文件已创建，但无法安全关闭文件句柄。",
+                    )
+                })?;
+            }
+            "directory" => sftp.create_dir(path.clone()).await.map_err(|_| {
+                AppError::new(
+                    "SFTP_CREATE_DIRECTORY_FAILED",
+                    "无法创建远程文件夹，请检查目录权限。",
+                )
+            })?,
+            _ => {
+                return Err(AppError::new(
+                    "INVALID_INPUT",
+                    "新建类型只能是文件或文件夹。",
+                ))
+            }
+        }
+        Ok(RemoteEntryCreation {
+            path,
+            entry_type: entry_type.to_string(),
         })
     }
 
@@ -1131,6 +1404,7 @@ impl SshManager {
                 local_path: Some(local_path),
                 file_name,
                 target,
+                overwrite: item.overwrite,
                 temporary_path: None,
                 size: metadata.len(),
                 transferred: 0,
@@ -1143,8 +1417,8 @@ impl SshManager {
             prepared.push(transfer);
         }
 
-        let summaries = {
-            let mut transfers = self.inner.transfers.write().await;
+        {
+            let transfers = self.inner.transfers.write().await;
             for transfer in &prepared {
                 if transfers.values().any(|existing| {
                     existing.session_id == transfer.session_id
@@ -1157,6 +1431,22 @@ impl SshManager {
                     ));
                 }
             }
+        }
+        for transfer in &mut prepared {
+            let availability = if transfer.overwrite {
+                assert_remote_target_replaceable(&sftp, &transfer.target)
+                    .await
+                    .map(|_| ())
+            } else {
+                assert_remote_target_available(&sftp, &transfer.target).await
+            };
+            if let Err(error) = availability {
+                transfer.state = TransferState::Failed;
+                transfer.error = Some(error);
+            }
+        }
+        let summaries = {
+            let mut transfers = self.inner.transfers.write().await;
             for transfer in &prepared {
                 transfers.insert(transfer.id.clone(), transfer.clone());
             }
@@ -1165,20 +1455,13 @@ impl SshManager {
                 .map(TransferSummary::from)
                 .collect::<Vec<_>>()
         };
-        for transfer in &prepared {
-            if let Err(error) = assert_remote_target_available(&sftp, &transfer.target).await {
-                let mut transfers = self.inner.transfers.write().await;
-                for prepared_transfer in &prepared {
-                    transfers.remove(&prepared_transfer.id);
-                }
-                return Err(error);
-            }
-        }
         for transfer in prepared {
             if let Err(error) = self.emit_transfer(&transfer) {
                 report_background_error("发送 SFTP 排队状态", &error);
             }
-            self.spawn_upload(transfer.id.clone(), transfer.attempt_id.clone());
+            if transfer.state == TransferState::Queued {
+                self.spawn_upload(transfer.id.clone(), transfer.attempt_id.clone());
+            }
         }
         Ok(summaries)
     }
@@ -1238,7 +1521,11 @@ impl SshManager {
         };
         let session = self.session(&retry_candidate.session_id).await?;
         let sftp = self.get_sftp(&session).await?;
-        assert_remote_target_available(&sftp, &retry_candidate.target).await?;
+        if retry_candidate.overwrite {
+            assert_remote_target_replaceable(&sftp, &retry_candidate.target).await?;
+        } else {
+            assert_remote_target_available(&sftp, &retry_candidate.target).await?;
+        }
 
         let (summary, attempt_id) = {
             let mut transfers = self.inner.transfers.write().await;
@@ -1551,9 +1838,15 @@ impl SshManager {
             .get_sftp(session)
             .await
             .map_err(|error| (error, None))?;
-        assert_remote_target_available(&sftp, &transfer.target)
-            .await
-            .map_err(|error| (error, None))?;
+        if transfer.overwrite {
+            assert_remote_target_replaceable(&sftp, &transfer.target)
+                .await
+                .map_err(|error| (error, None))?;
+        } else {
+            assert_remote_target_available(&sftp, &transfer.target)
+                .await
+                .map_err(|error| (error, None))?;
+        }
 
         let temporary_path = join_remote_path(
             remote_parent(&transfer.target),
@@ -1707,20 +2000,69 @@ impl SshManager {
         if let Err(error) = self.emit_transfer_by_id(transfer_id, attempt_id).await {
             report_background_error("发送 SFTP 收尾状态", &error);
         }
-        assert_remote_target_available(&sftp, &transfer.target)
-            .await
-            .map_err(|error| (error, Some(temporary_path.clone())))?;
-        sftp.rename(temporary_path.clone(), transfer.target.clone())
-            .await
-            .map_err(|_| {
-                (
+        let replace_existing = if transfer.overwrite {
+            assert_remote_target_replaceable(&sftp, &transfer.target)
+                .await
+                .map_err(|error| (error, Some(temporary_path.clone())))?
+        } else {
+            assert_remote_target_available(&sftp, &transfer.target)
+                .await
+                .map_err(|error| (error, Some(temporary_path.clone())))?;
+            false
+        };
+        if replace_existing {
+            let backup_path = join_remote_path(
+                remote_parent(&transfer.target),
+                &format!(".remote-terminal-backup-{}", Uuid::new_v4()),
+            );
+            sftp.rename(transfer.target.clone(), backup_path.clone())
+                .await
+                .map_err(|_| {
+                    (
+                        AppError::new(
+                            "SFTP_OVERWRITE_PREPARE_FAILED",
+                            "无法安全备份远程同名文件，覆盖已取消。",
+                        ),
+                        Some(temporary_path.clone()),
+                    )
+                })?;
+            if sftp
+                .rename(temporary_path.clone(), transfer.target.clone())
+                .await
+                .is_err()
+            {
+                let restored = sftp
+                    .rename(backup_path.clone(), transfer.target.clone())
+                    .await
+                    .is_ok();
+                return Err((
                     AppError::new(
-                        "SFTP_RENAME_FAILED",
-                        "文件已上传，但无法完成远程原子重命名。",
+                        "SFTP_OVERWRITE_RENAME_FAILED",
+                        if restored {
+                            "替换远程文件失败，原文件已恢复。"
+                        } else {
+                            "替换远程文件失败，且原文件恢复失败，请立即检查远程目录。"
+                        },
                     ),
                     Some(temporary_path.clone()),
-                )
-            })?;
+                ));
+            }
+            if sftp.remove_file(backup_path).await.is_err() {
+                report_background_transport_error("清理覆盖上传的远程备份文件失败");
+            }
+        } else {
+            sftp.rename(temporary_path.clone(), transfer.target.clone())
+                .await
+                .map_err(|_| {
+                    (
+                        AppError::new(
+                            "SFTP_RENAME_FAILED",
+                            "文件已上传，但无法完成远程原子重命名。",
+                        ),
+                        Some(temporary_path.clone()),
+                    )
+                })?;
+        }
 
         self.update_transfer(transfer_id, attempt_id, |current| {
             current.state = TransferState::Success;
@@ -2798,6 +3140,21 @@ async fn assert_remote_target_available(sftp: &SftpSession, target: &str) -> App
     }
 }
 
+async fn assert_remote_target_replaceable(sftp: &SftpSession, target: &str) -> AppResult<bool> {
+    match sftp.symlink_metadata(target.to_string()).await {
+        Ok(metadata) if metadata.file_type() == FileType::File => Ok(true),
+        Ok(_) => Err(AppError::new(
+            "REMOTE_TARGET_NOT_REPLACEABLE",
+            "远程同名目标不是普通文件，不能覆盖。",
+        )),
+        Err(error) if sftp_not_found(&error) => Ok(false),
+        Err(_) => Err(AppError::new(
+            "SFTP_STAT_FAILED",
+            "无法检查远程同名文件是否可安全覆盖。",
+        )),
+    }
+}
+
 async fn assert_remote_rename_target_missing(sftp: &SftpSession, target: &str) -> AppResult<()> {
     match sftp.symlink_metadata(target.to_string()).await {
         Ok(_) => Err(AppError::new(
@@ -2845,6 +3202,49 @@ fn sftp_not_found(error: &SftpError) -> bool {
 
 fn system_time_to_iso(value: Option<SystemTime>) -> Option<String> {
     value.map(|time| DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn format_remote_permissions(metadata: &FileAttributes) -> String {
+    let mode = metadata.permissions.unwrap_or_default();
+    let file_type = match metadata.file_type() {
+        FileType::Dir => 'd',
+        FileType::Symlink => 'l',
+        FileType::File => '-',
+        FileType::Other => '?',
+    };
+    let mut value = String::with_capacity(10);
+    value.push(file_type);
+    for (mask, symbol) in [
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
+    ] {
+        value.push(if mode & mask != 0 { symbol } else { '-' });
+    }
+    value
+}
+
+fn format_remote_owner(metadata: &FileAttributes) -> String {
+    let user = metadata
+        .user
+        .clone()
+        .or_else(|| metadata.uid.map(|value| value.to_string()));
+    let group = metadata
+        .group
+        .clone()
+        .or_else(|| metadata.gid.map(|value| value.to_string()));
+    match (user, group) {
+        (Some(user), Some(group)) => format!("{user}/{group}"),
+        (Some(user), None) => user,
+        (None, Some(group)) => group,
+        (None, None) => "—".to_string(),
+    }
 }
 
 fn sort_directory_entries(entries: &mut [DirectoryEntry]) {
@@ -2983,6 +3383,7 @@ mod tests {
             local_path: Some(PathBuf::from(r"C:\test\upload.bin")),
             file_name: "upload.bin".to_string(),
             target: "/tmp/upload.bin".to_string(),
+            overwrite: false,
             temporary_path: Some("/tmp/.upload.part".to_string()),
             size: 100,
             transferred: 100,
@@ -3224,24 +3625,32 @@ mod tests {
                 entry_type: "file".to_string(),
                 size: 1,
                 modified_at: None,
+                permissions: "-rw-r--r--".to_string(),
+                owner: "root/root".to_string(),
             },
             DirectoryEntry {
                 name: "Beta".to_string(),
                 entry_type: "directory".to_string(),
                 size: 0,
                 modified_at: None,
+                permissions: "drwxr-xr-x".to_string(),
+                owner: "root/root".to_string(),
             },
             DirectoryEntry {
                 name: "alpha".to_string(),
                 entry_type: "directory".to_string(),
                 size: 0,
                 modified_at: None,
+                permissions: "drwxr-xr-x".to_string(),
+                owner: "root/root".to_string(),
             },
             DirectoryEntry {
                 name: "A.txt".to_string(),
                 entry_type: "file".to_string(),
                 size: 1,
                 modified_at: None,
+                permissions: "-rw-r--r--".to_string(),
+                owner: "root/root".to_string(),
             },
         ];
         sort_directory_entries(&mut entries);

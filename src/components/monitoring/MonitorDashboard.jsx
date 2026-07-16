@@ -21,10 +21,10 @@ import {
 } from "recharts";
 import { toMonitorPercent } from "../../services/monitor-metrics.js";
 
-export function MonitorDashboard({ server, metrics, sampledAt, loading = false, error = "" }) {
+export function MonitorDashboard({ server, metrics, sampledAt, loading = false, error = "", compact = false }) {
   if (!metrics) {
     return (
-      <div className="monitor-dashboard monitor-dashboard--empty" role="status">
+      <div className={`monitor-dashboard ${compact ? "is-compact" : ""} monitor-dashboard--empty`} role="status">
         <Gauge size={26} weight="duotone" />
         <strong>{loading ? "正在采集 Linux 性能数据…" : "暂无性能数据"}</strong>
         <span>{error || "建立 SSH 连接后会开始真实采样。"}</span>
@@ -39,7 +39,7 @@ export function MonitorDashboard({ server, metrics, sampledAt, loading = false, 
   const history = Array.isArray(metrics.history) ? metrics.history : [];
 
   return (
-    <div className="monitor-dashboard">
+    <div className={`monitor-dashboard ${compact ? "is-compact" : ""}`}>
       <section className="monitor-dashboard__region monitor-dashboard__region--system" aria-label="系统信息">
         <RegionHeader icon={<DesktopTower size={18} />} title="系统概览" meta={loading ? "正在刷新" : `采样于 ${sampledAt}`} />
         {error && <div className="monitor-dashboard__warning" role="alert">{error}，当前显示上一次成功采样。</div>}

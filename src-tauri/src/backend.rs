@@ -7,9 +7,10 @@ use crate::{
         MonitorSnapshot, COUNTER_COMMAND, MONITOR_SNAPSHOT_COMMAND,
     },
     ssh::{
-        CompletionItem, ConnectResult, DirectoryListing, DisconnectResult, RemoteEntryRemoval,
-        RemoteEntryRename, SshConnection, SshManager, TerminalAttachResult, TerminalDimensions,
-        TransferSummary, UploadFile,
+        CompletionItem, ConnectResult, DirectoryListing, DisconnectResult, RemoteEntryCreation,
+        RemoteEntryRemoval, RemoteEntryRename, RemoteTextChunk, RemoteTextWriteResult,
+        SshConnection, SshManager, TerminalAttachResult, TerminalDimensions, TransferSummary,
+        UploadFile,
     },
     storage::{
         migrate_legacy_electron_data, validate_id, Connection, ConnectionDraft, ConnectionRemoval,
@@ -521,6 +522,36 @@ impl BackendState {
         self.ssh.list_directory(session_id, path).await
     }
 
+    pub async fn read_remote_text(
+        &self,
+        session_id: &str,
+        path: &str,
+        offset: Option<u64>,
+    ) -> AppResult<RemoteTextChunk> {
+        self.ssh.read_remote_text(session_id, path, offset).await
+    }
+
+    pub async fn write_remote_text(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+        expected_size: u64,
+        expected_modified_at: Option<&str>,
+    ) -> AppResult<RemoteTextWriteResult> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        self.ssh
+            .write_remote_text(
+                session_id,
+                path,
+                content,
+                expected_size,
+                expected_modified_at,
+            )
+            .await
+    }
+
     pub async fn remove_remote_entry(
         &self,
         session_id: &str,
@@ -545,6 +576,20 @@ impl BackendState {
         self.ensure_operations_open()?;
         self.ssh
             .rename_remote_entry(session_id, source_path, target_path, expected_entry_type)
+            .await
+    }
+
+    pub async fn create_remote_entry(
+        &self,
+        session_id: &str,
+        directory: &str,
+        name: &str,
+        entry_type: &str,
+    ) -> AppResult<RemoteEntryCreation> {
+        let _guard = self.operation_gate.read().await;
+        self.ensure_operations_open()?;
+        self.ssh
+            .create_remote_entry(session_id, directory, name, entry_type)
             .await
     }
 

@@ -18,6 +18,7 @@ use uuid::Uuid;
 const INSTALL_DATA_MIGRATION_VERSION: u32 = 1;
 const DEFAULT_EXPLORER_WIDTH: f64 = 320.0;
 const DEFAULT_BOTTOM_PANEL_HEIGHT: f64 = 344.0;
+const DEFAULT_MONITOR_INTERVAL_SECONDS: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +44,15 @@ pub enum CommandAssistanceMode {
     #[default]
     Auto,
     Shortcut,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExplorerPlacement {
+    #[default]
+    Left,
+    Right,
+    Bottom,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -75,6 +85,10 @@ pub struct UiPreferences {
     #[serde(default = "default_explorer_width")]
     pub explorer_width: f64,
     #[serde(default)]
+    pub explorer_placement: ExplorerPlacement,
+    #[serde(default)]
+    pub explorer_collapsed: bool,
+    #[serde(default)]
     pub rail_expanded: bool,
     #[serde(default = "default_true")]
     pub bottom_visible: bool,
@@ -84,6 +98,8 @@ pub struct UiPreferences {
     pub bottom_panel_height: f64,
     #[serde(default)]
     pub command_assistance_mode: CommandAssistanceMode,
+    #[serde(default = "default_monitor_interval_seconds")]
+    pub monitor_interval_seconds: u64,
 }
 
 impl Default for UiPreferences {
@@ -92,11 +108,14 @@ impl Default for UiPreferences {
             interface_theme_mode: InterfaceThemeMode::System,
             appearance: AppearancePreferences::default(),
             explorer_width: DEFAULT_EXPLORER_WIDTH,
+            explorer_placement: ExplorerPlacement::Left,
+            explorer_collapsed: false,
             rail_expanded: false,
             bottom_visible: true,
             bottom_collapsed: false,
             bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
             command_assistance_mode: CommandAssistanceMode::Auto,
+            monitor_interval_seconds: DEFAULT_MONITOR_INTERVAL_SECONDS,
         }
     }
 }
@@ -471,6 +490,10 @@ fn default_bottom_panel_height() -> f64 {
     DEFAULT_BOTTOM_PANEL_HEIGHT
 }
 
+fn default_monitor_interval_seconds() -> u64 {
+    DEFAULT_MONITOR_INTERVAL_SECONDS
+}
+
 fn validate_ui_preferences(preferences: &UiPreferences) -> Result<(), String> {
     for (label, color) in [
         ("accent", &preferences.appearance.accent),
@@ -501,6 +524,9 @@ fn validate_ui_preferences(preferences: &UiPreferences) -> Result<(), String> {
         || !(120.0..=1_000.0).contains(&preferences.bottom_panel_height)
     {
         return Err("bottom panel height is invalid".to_string());
+    }
+    if ![1, 2, 5, 10, 30].contains(&preferences.monitor_interval_seconds) {
+        return Err("monitor interval is invalid".to_string());
     }
     Ok(())
 }
@@ -553,8 +579,8 @@ fn persist_settings(path: &Path, settings: &PersistedSettings) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CloseBehavior, CommandAssistanceMode, InterfaceThemeMode, UiPreferences,
-        WindowPlacement,
+        AppState, CloseBehavior, CommandAssistanceMode, ExplorerPlacement, InterfaceThemeMode,
+        UiPreferences, WindowPlacement,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -655,8 +681,11 @@ mod tests {
         preferences.appearance.accent = "#60a5fa".to_string();
         preferences.appearance.terminal_background = "#000000".to_string();
         preferences.explorer_width = 408.0;
+        preferences.explorer_placement = ExplorerPlacement::Right;
+        preferences.explorer_collapsed = true;
         preferences.bottom_panel_height = 292.0;
         preferences.command_assistance_mode = CommandAssistanceMode::Shortcut;
+        preferences.monitor_interval_seconds = 10;
         let placement = WindowPlacement {
             x: 140,
             y: 90,
@@ -679,7 +708,7 @@ mod tests {
         let state = load_state(&directory);
         let original = state.ui_preferences().unwrap();
         let mut invalid = original.clone();
-        invalid.appearance.accent = "not-a-color".to_string();
+        invalid.monitor_interval_seconds = 3;
 
         assert!(state.set_ui_preferences(invalid).is_err());
         assert_eq!(state.ui_preferences().unwrap(), original);

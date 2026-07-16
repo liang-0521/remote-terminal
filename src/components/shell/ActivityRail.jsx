@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowsLeftRight,
   ChartLine,
   Desktop,
   Files,
@@ -8,15 +7,12 @@ import {
   HardDrives,
   Moon,
   Sun,
-  Terminal,
 } from "@phosphor-icons/react";
 import { IconButton } from "../shared/IconButton.jsx";
 
 const ITEMS = [
   { id: "connections", label: "服务器连接", Icon: HardDrives },
   { id: "files", label: "资源管理器", Icon: Files },
-  { id: "sessions", label: "终端会话", Icon: Terminal },
-  { id: "transfers", label: "传输任务", Icon: ArrowsLeftRight },
   { id: "monitor", label: "性能监控", Icon: ChartLine },
 ];
 

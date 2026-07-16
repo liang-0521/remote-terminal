@@ -5,6 +5,9 @@ import { BottomPanel } from "./components/shell/BottomPanel.jsx";
 import { CloseRequestDialog } from "./components/connections/CloseRequestDialog.jsx";
 import { ConnectionDialog } from "./components/connections/ConnectionDialog.jsx";
 import { ExplorerPanel } from "./components/files/ExplorerPanel.jsx";
+import { RemoteTextEditor } from "./components/files/RemoteTextEditor.jsx";
+import { UnsavedChangesDialog } from "./components/files/UnsavedChangesDialog.jsx";
+import { UploadConflictDialog } from "./components/files/UploadConflictDialog.jsx";
 import { HostKeyDialog } from "./components/connections/HostKeyDialog.jsx";
 import { PasswordDialog } from "./components/connections/PasswordDialog.jsx";
 import { SettingsDialog } from "./components/settings/SettingsDialog.jsx";
@@ -13,10 +16,12 @@ import { TopBar } from "./components/shell/TopBar.jsx";
 import { DEFAULT_EXPLORER_WIDTH, WorkspaceResizeHandle } from "./components/shell/WorkspaceResizeHandle.jsx";
 import { getNativeClient } from "./native/client.js";
 import { resolveInterfaceColorScheme } from "./services/interface-theme.js";
+import { shouldRefreshRemoteDirectory } from "./services/transfer-state.js";
 import "./native-styles.css";
 import "./update-styles.css";
 import "./credential-styles.css";
 import "./theme-styles.css";
+import "./feature-styles.css";
 
 const NativeTerminalPane = lazy(() => import("./components/terminal/NativeTerminalPane.jsx")
   .then(({ NativeTerminalPane: component }) => ({ default: component })));
@@ -44,6 +49,7 @@ function createWorkspace(connectionId) {
   return {
     connectionId,
     sessionId: null,
+    terminalSessionId: null,
     state: "disconnected",
     error: "",
     directory: null,
@@ -85,6 +91,11 @@ function toUiTransfer(transfer) {
   };
 }
 
+function localFileName(file) {
+  const path = typeof file === "string" ? file : file?.localPath;
+  return typeof path === "string" ? path.split(/[\\/]/).at(-1) || "" : "";
+}
+
 function formatSampleTime(isoValue) {
   const date = new Date(isoValue);
   return Number.isNaN(date.getTime())
@@ -104,6 +115,8 @@ export function NativeApp() {
   const [activeRail, setActiveRail] = useState("connections");
   const [railExpanded, setRailExpanded] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(DEFAULT_EXPLORER_WIDTH);
+  const [explorerPlacement, setExplorerPlacement] = useState("left");
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const [connectionDialog, setConnectionDialog] = useState({ open: false, view: "list" });
   const [passwordConnectionId, setPasswordConnectionId] = useState(null);
@@ -115,9 +128,11 @@ export function NativeApp() {
   const [closeRequestId, setCloseRequestId] = useState(null);
   const [closeRequestActiveSessionCount, setCloseRequestActiveSessionCount] = useState(0);
   const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
+  const [closeRequestDirtyDocuments, setCloseRequestDirtyDocuments] = useState([]);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
   const [interfaceThemeMode, setInterfaceThemeMode] = useState("system");
   const [commandAssistanceMode, setCommandAssistanceMode] = useState("auto");
+  const [monitorIntervalSeconds, setMonitorIntervalSeconds] = useState(1);
   const [uiPreferencesReady, setUiPreferencesReady] = useState(false);
   const [uiPreferencesError, setUiPreferencesError] = useState("");
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => (
@@ -129,10 +144,14 @@ export function NativeApp() {
   const [updateActionError, setUpdateActionError] = useState("");
   const [credentialStorage, setCredentialStorage] = useState({ available: false, protection: "windows-user" });
   const [dataDirectoryStatus, setDataDirectoryStatus] = useState(null);
-  const [activeBottomTab, setActiveBottomTab] = useState("transfer");
   const [bottomVisible, setBottomVisible] = useState(true);
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT);
+  const [bottomView, setBottomView] = useState("transfer");
+  const [openDocuments, setOpenDocuments] = useState([]);
+  const [activeDocumentKey, setActiveDocumentKey] = useState(null);
+  const [unsavedChangesRequest, setUnsavedChangesRequest] = useState(null);
+  const [uploadConflictRequest, setUploadConflictRequest] = useState(null);
   const activeConnectionIdRef = useRef(null);
   const pendingSecretsRef = useRef(new Map());
   const attemptsRef = useRef(new Map());
@@ -141,7 +160,10 @@ export function NativeApp() {
   const monitorInFlightRef = useRef(new Set());
   const uiPreferencesLoadedRef = useRef(false);
   const uiPreferencesSaveQueueRef = useRef(Promise.resolve());
+  const openDocumentsRef = useRef([]);
+  const unsavedChangesResolverRef = useRef(null);
   activeConnectionIdRef.current = activeConnectionId;
+  openDocumentsRef.current = openDocuments;
   const interfaceColorScheme = resolveInterfaceColorScheme(interfaceThemeMode, systemPrefersDark);
 
   useEffect(() => {
@@ -152,11 +174,14 @@ export function NativeApp() {
         setInterfaceThemeMode(preferences.interfaceThemeMode);
         setAppearance((current) => ({ ...current, ...preferences.appearance }));
         setExplorerWidth(Math.round(preferences.explorerWidth));
+        setExplorerPlacement(preferences.explorerPlacement || "left");
+        setExplorerCollapsed(Boolean(preferences.explorerCollapsed));
         setRailExpanded(preferences.railExpanded);
-        setBottomVisible(preferences.bottomVisible);
+        setBottomVisible(true);
         setBottomCollapsed(preferences.bottomCollapsed);
         setBottomPanelHeight(Math.round(preferences.bottomPanelHeight));
         setCommandAssistanceMode(preferences.commandAssistanceMode);
+        setMonitorIntervalSeconds(preferences.monitorIntervalSeconds || 1);
         setUiPreferencesError("");
         uiPreferencesLoadedRef.current = true;
       })
@@ -180,11 +205,14 @@ export function NativeApp() {
         wallpaperOpacity: appearance.wallpaperOpacity,
       },
       explorerWidth,
+      explorerPlacement,
+      explorerCollapsed,
       railExpanded,
-      bottomVisible,
+      bottomVisible: true,
       bottomCollapsed,
       bottomPanelHeight,
       commandAssistanceMode,
+      monitorIntervalSeconds,
     };
     const request = uiPreferencesSaveQueueRef.current
       .catch(() => undefined)
@@ -210,7 +238,10 @@ export function NativeApp() {
     client,
     commandAssistanceMode,
     explorerWidth,
+    explorerPlacement,
+    explorerCollapsed,
     interfaceThemeMode,
+    monitorIntervalSeconds,
     railExpanded,
     uiPreferencesReady,
   ]);
@@ -275,6 +306,13 @@ export function NativeApp() {
       }
     }
   }, [addIssue, client, updateWorkspace]);
+
+  const listRemoteDirectory = useCallback((remotePath) => {
+    const connectionId = activeConnectionIdRef.current;
+    const sessionId = connectionId ? workspacesRef.current[connectionId]?.sessionId : null;
+    if (!sessionId) return Promise.reject(new Error("当前工作区没有可用的 SFTP 会话。"));
+    return client.sftp.list(sessionId, remotePath);
+  }, [client]);
 
   const loadCompletionCatalog = useCallback(async (connectionId, sessionIdOverride) => {
     const sessionId = sessionIdOverride || workspacesRef.current[connectionId]?.sessionId;
@@ -437,6 +475,7 @@ export function NativeApp() {
       setCloseRequestId(event.requestId);
       setCloseRequestActiveSessionCount(activeSessionCount);
       setCloseRequestActiveTransferCount(activeTransferCount);
+      setCloseRequestDirtyDocuments(openDocumentsRef.current.filter((document) => document.dirty).map((document) => document.name));
       setCloseRequestOpen(true);
     });
     return () => {
@@ -460,11 +499,20 @@ export function NativeApp() {
         };
       });
       if (event.error?.message) addIssue(connectionId, "SSH 会话错误", event.error.message, event.error.code);
+      if (event.state === "disconnected") {
+        setOpenDocuments((current) => {
+          const next = current.filter((document) => document.sessionId !== event.sessionId);
+          setActiveDocumentKey((activeKey) => next.some((document) => document.key === activeKey) ? activeKey : null);
+          return next;
+        });
+      }
     });
     const unsubscribeTransfer = client.events.onTransferProgress((event) => {
       if (!event?.connectionId || !event.sessionId) return;
       const currentWorkspace = workspacesRef.current[event.connectionId];
       if (currentWorkspace?.sessionId !== event.sessionId) return;
+      const previousTransfer = currentWorkspace.transfers.find((item) => item.id === event.id);
+      const justCompleted = shouldRefreshRemoteDirectory(previousTransfer?.state, event.state);
       updateWorkspace(event.connectionId, (workspace) => {
         const transfer = toUiTransfer(event);
         const exists = workspace.transfers.some((item) => item.id === transfer.id);
@@ -478,7 +526,7 @@ export function NativeApp() {
       if (event.state === "failed" && event.error?.message) {
         addIssue(event.connectionId, `上传失败：${event.fileName}`, event.error.message, event.error.code);
       }
-      if (event.state === "success") {
+      if (justCompleted) {
         const workspace = workspacesRef.current[event.connectionId];
         if (workspace?.sessionId === event.sessionId && workspace.directory) {
           void loadDirectory(event.connectionId, workspace.directory, event.sessionId);
@@ -509,7 +557,7 @@ export function NativeApp() {
       return server ? {
         id: connectionId,
         label: server.name,
-        sessionId: workspace.sessionId,
+        sessionId: workspace.terminalSessionId,
         state: workspace.state,
         error: workspace.error,
         completionCatalog: workspace.completionCatalog,
@@ -575,6 +623,7 @@ export function NativeApp() {
     setCloseRequestId(null);
     setCloseRequestActiveSessionCount(0);
     setCloseRequestActiveTransferCount(0);
+    setCloseRequestDirtyDocuments([]);
   }
 
   function openConnections(view = "list") {
@@ -586,6 +635,10 @@ export function NativeApp() {
     setWorkspaceOrder((items) => items.includes(connectionId) ? items : [...items, connectionId]);
     setActiveConnectionId(connectionId);
     setActiveRail("files");
+    if (explorerPlacement === "bottom") {
+      setBottomView("files");
+      setBottomCollapsed(false);
+    }
   }
 
   function selectServer(connectionId) {
@@ -620,6 +673,7 @@ export function NativeApp() {
       }
       updateWorkspace(connectionId, {
         sessionId: result.sessionId,
+        terminalSessionId: result.sessionId,
         state: "connected",
         error: "",
         directory: result.home,
@@ -716,11 +770,32 @@ export function NativeApp() {
       : item));
   }
 
+  function requestUnsavedChangesConfirmation(documents, actionLabel) {
+    const dirtyDocuments = documents.filter((document) => document.dirty);
+    if (!dirtyDocuments.length) return Promise.resolve(true);
+    if (unsavedChangesResolverRef.current) unsavedChangesResolverRef.current(false);
+    setActiveConnectionId(dirtyDocuments[0].connectionId);
+    setActiveDocumentKey(dirtyDocuments[0].key);
+    setUnsavedChangesRequest({ documents: dirtyDocuments, actionLabel });
+    return new Promise((resolve) => {
+      unsavedChangesResolverRef.current = resolve;
+    });
+  }
+
+  function resolveUnsavedChangesConfirmation(confirmed) {
+    const resolve = unsavedChangesResolverRef.current;
+    unsavedChangesResolverRef.current = null;
+    setUnsavedChangesRequest(null);
+    resolve?.(confirmed);
+  }
+
   async function deleteServerConnection(connectionId) {
     const workspace = workspacesRef.current[connectionId];
     if (workspace?.transfers.some((transfer) => ACTIVE_TRANSFER_STATES.has(transfer.state))) {
       throw new Error("该服务器仍有活动传输，请完成或取消传输后再删除连接。");
     }
+    const documents = openDocumentsRef.current.filter((document) => document.connectionId === connectionId);
+    if (!await requestUnsavedChangesConfirmation(documents, "删除服务器连接")) return;
 
     attemptsRef.current.delete(connectionId);
     pendingSecretsRef.current.delete(connectionId);
@@ -767,21 +842,29 @@ export function NativeApp() {
     setHostKeyPrompt(null);
   }
 
-  function closeWorkspace(connectionId) {
-    attemptsRef.current.delete(connectionId);
-    pendingSecretsRef.current.delete(connectionId);
-    directoryRequestsRef.current.delete(connectionId);
-    completionRequestsRef.current.delete(connectionId);
+  async function closeWorkspace(connectionId) {
     const workspace = workspacesRef.current[connectionId];
     if (workspace?.transfers.some((transfer) => ACTIVE_TRANSFER_STATES.has(transfer.state))) {
       addIssue(connectionId, "工作区仍有活动传输", "请等待上传完成或取消传输后再关闭工作区。", "ACTIVE_TRANSFER");
       setActiveConnectionId(connectionId);
-      openBottomTab("transfer");
+      openTransferPanel();
       return;
     }
+    const documents = openDocumentsRef.current.filter((document) => document.connectionId === connectionId);
+    if (!await requestUnsavedChangesConfirmation(documents, "关闭工作区")) return;
+    attemptsRef.current.delete(connectionId);
+    pendingSecretsRef.current.delete(connectionId);
+    directoryRequestsRef.current.delete(connectionId);
+    completionRequestsRef.current.delete(connectionId);
     if (workspace?.sessionId) void client.ssh.disconnect(workspace.sessionId);
+    setOpenDocuments((current) => {
+      const next = current.filter((document) => document.connectionId !== connectionId);
+      setActiveDocumentKey((activeKey) => next.some((document) => document.key === activeKey) ? activeKey : null);
+      return next;
+    });
     updateWorkspace(connectionId, {
       sessionId: null,
+      terminalSessionId: null,
       state: "disconnected",
       error: "",
       filesLoading: false,
@@ -796,15 +879,7 @@ export function NativeApp() {
     }
   }
 
-  async function uploadFiles(files) {
-    const connectionId = activeConnectionIdRef.current;
-    const workspaceAtStart = connectionId ? workspacesRef.current[connectionId] : null;
-    if (!connectionId || !workspaceAtStart?.sessionId || !workspaceAtStart.directory) {
-      if (connectionId) addIssue(connectionId, "无法上传文件", "当前工作区没有可用的 SFTP 目录。", "SFTP_UNAVAILABLE");
-      return;
-    }
-    const sessionId = workspaceAtStart.sessionId;
-    const directory = workspaceAtStart.directory;
+  async function startUpload({ connectionId, sessionId, directory, files }) {
     try {
       const transfers = await client.sftp.upload(sessionId, directory, files);
       if (workspacesRef.current[connectionId]?.sessionId !== sessionId) return;
@@ -815,12 +890,59 @@ export function NativeApp() {
           ...workspace.transfers.filter((existing) => !transfers.some((item) => item.id === existing.id)),
         ],
       }));
-      if (activeConnectionIdRef.current === connectionId) openBottomTab("transfer");
+      if (activeConnectionIdRef.current === connectionId) openTransferPanel();
     } catch (error) {
       if (workspacesRef.current[connectionId]?.sessionId !== sessionId) return;
       addIssue(connectionId, "无法开始上传", error.message, error.code);
-      if (activeConnectionIdRef.current === connectionId) openBottomTab("issues");
+      if (activeConnectionIdRef.current === connectionId) openTransferPanel();
     }
+  }
+
+  async function uploadFiles(files) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspaceAtStart = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspaceAtStart?.sessionId || !workspaceAtStart.directory) {
+      if (connectionId) addIssue(connectionId, "无法上传文件", "当前工作区没有可用的 SFTP 目录。", "SFTP_UNAVAILABLE");
+      return;
+    }
+    const sessionId = workspaceAtStart.sessionId;
+    const directory = workspaceAtStart.directory;
+    const existingEntries = new Map(workspaceAtStart.entries.map((entry) => [entry.name, entry]));
+    const selected = Array.from(files || []);
+    const blocked = selected.filter((file) => {
+      const entry = existingEntries.get(localFileName(file));
+      return entry && entry.type !== "file";
+    });
+    if (blocked.length) {
+      setUploadConflictRequest({
+        mode: "blocked",
+        directory,
+        names: blocked.map(localFileName),
+      });
+      return;
+    }
+    const conflicts = selected.filter((file) => existingEntries.get(localFileName(file))?.type === "file");
+    const conflictNames = new Set(conflicts.map(localFileName));
+    const preparedFiles = selected.map((file) => ({
+      ...(typeof file === "string" ? { localPath: file } : file),
+      overwrite: conflictNames.has(localFileName(file)),
+    }));
+    const request = { connectionId, sessionId, directory, files: preparedFiles };
+    if (conflicts.length) {
+      setUploadConflictRequest({
+        ...request,
+        mode: "overwrite",
+        names: conflicts.map(localFileName),
+      });
+      return;
+    }
+    await startUpload(request);
+  }
+
+  async function confirmUploadConflict(request) {
+    if (request.mode !== "overwrite") return;
+    setUploadConflictRequest(null);
+    await startUpload(request);
   }
 
   async function selectUploadFiles() {
@@ -891,12 +1013,24 @@ export function NativeApp() {
       throw new Error("当前工作区没有可用的 SFTP 会话。");
     }
     try {
-      return await client.sftp.rename(
+      const result = await client.sftp.rename(
         workspace.sessionId,
         sourcePath,
         targetPath,
         expectedEntryType,
       );
+      setOpenDocuments((current) => current.map((document) => document.path === sourcePath
+        ? {
+          ...document,
+          key: `${document.connectionId}:${targetPath}`,
+          path: targetPath,
+          name: targetPath.split("/").at(-1) || document.name,
+        }
+        : document));
+      setActiveDocumentKey((current) => current === `${connectionId}:${sourcePath}`
+        ? `${connectionId}:${targetPath}`
+        : current);
+      return result;
     } catch (error) {
       addIssue(
         connectionId,
@@ -908,16 +1042,108 @@ export function NativeApp() {
     }
   }
 
-  function openBottomTab(tab) {
-    setActiveBottomTab(tab);
+  async function createRemoteEntry(directory, name, entryType) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspace = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspace?.sessionId) throw new Error("当前工作区没有可用的 SFTP 会话。");
+    try {
+      const result = await client.sftp.create(workspace.sessionId, directory, name, entryType);
+      await loadDirectory(connectionId, directory, workspace.sessionId);
+      return result;
+    } catch (error) {
+      addIssue(connectionId, `新建远程${entryType === "directory" ? "文件夹" : "文件"}失败`, error?.message || "无法创建远程条目。", error?.code || "SFTP_CREATE_FAILED");
+      throw error;
+    }
+  }
+
+  function openTransferPanel() {
     setBottomVisible(true);
     setBottomCollapsed(false);
+    setBottomView("transfer");
   }
 
   function handleRailChange(item) {
     setActiveRail(item);
-    if (item === "monitor") openBottomTab("monitor");
-    if (item === "transfers") openBottomTab("transfer");
+    if (item === "files" && explorerPlacement === "bottom") {
+      setBottomView("files");
+      setBottomCollapsed(false);
+    }
+  }
+
+  function changeExplorerPlacement(placement) {
+    setExplorerPlacement(placement);
+    setExplorerCollapsed(false);
+    if (placement === "bottom") {
+      setBottomView("files");
+      setBottomCollapsed(false);
+    }
+  }
+
+  function openRemoteTextFile({ entry, path }) {
+    const connectionId = activeConnectionIdRef.current;
+    const workspace = connectionId ? workspacesRef.current[connectionId] : null;
+    if (!connectionId || !workspace?.sessionId) {
+      if (connectionId) addIssue(connectionId, "无法预览远程文件", "当前工作区没有可用的 SFTP 会话。", "SFTP_UNAVAILABLE");
+      return;
+    }
+    const key = `${connectionId}:${path}`;
+    setOpenDocuments((current) => {
+      const existing = current.find((document) => document.key === key);
+      if (existing) {
+        return current.map((document) => document.key === key
+          ? { ...document, sessionId: workspace.sessionId, name: entry.name }
+          : document);
+      }
+      return [...current, {
+        key,
+        dirty: false,
+      connectionId,
+      sessionId: workspace.sessionId,
+      path,
+      name: entry.name,
+      }];
+    });
+    setActiveDocumentKey(key);
+  }
+
+  function selectRemoteDocument(key) {
+    if (!key) {
+      setActiveDocumentKey(null);
+      return;
+    }
+    const document = openDocuments.find((item) => item.key === key);
+    if (!document) return;
+    setActiveConnectionId(document.connectionId);
+    setActiveDocumentKey(key);
+  }
+
+  async function closeRemoteDocument(key) {
+    const document = openDocumentsRef.current.find((item) => item.key === key);
+    if (!document) return;
+    if (!await requestUnsavedChangesConfirmation([document], "关闭文件")) return;
+    const currentDocuments = openDocumentsRef.current;
+    const index = currentDocuments.findIndex((item) => item.key === key);
+    const next = currentDocuments.filter((item) => item.key !== key);
+    setOpenDocuments(next);
+    if (activeDocumentKey === key) {
+      const nextActive = next[index] || next[index - 1] || null;
+      setActiveDocumentKey(nextActive?.key || null);
+      if (nextActive) setActiveConnectionId(nextActive.connectionId);
+    }
+  }
+
+  function updateRemoteDocumentDirty(key, dirty) {
+    setOpenDocuments((current) => current.map((document) => (
+      document.key === key && document.dirty !== dirty ? { ...document, dirty } : document
+    )));
+  }
+
+  function reconnectWorkspace(connectionId) {
+    const connection = connections.find((item) => item.id === connectionId);
+    const workspace = workspacesRef.current[connectionId];
+    if (!connection || workspace?.state === "connecting") return;
+    if (connection.hasSavedPassword) void beginConnect(connectionId).catch(() => undefined);
+    else setPasswordConnectionId(connectionId);
   }
 
   const onTerminalError = useCallback((error, connectionId) => {
@@ -930,11 +1156,51 @@ export function NativeApp() {
     void sampleMonitor(activeConnectionId, activeWorkspace.sessionId);
     const interval = window.setInterval(() => {
       void sampleMonitor(activeConnectionId, activeWorkspace.sessionId);
-    }, 5_000);
+    }, monitorIntervalSeconds * 1_000);
     return () => window.clearInterval(interval);
-  }, [activeConnectionId, activeWorkspace?.sessionId, activeWorkspace?.state, sampleMonitor]);
+  }, [activeConnectionId, activeWorkspace?.sessionId, activeWorkspace?.state, monitorIntervalSeconds, sampleMonitor]);
 
   const taskPanelHeight = bottomVisible && activeServer ? (bottomCollapsed ? 52 : bottomPanelHeight) : 0;
+  const explorerDockPlacement = activeRail === "files" ? explorerPlacement : "left";
+  const explorerDockCollapsed = activeRail === "files"
+    && explorerDockPlacement !== "bottom"
+    && explorerCollapsed;
+  const explorerDockWidth = explorerDockCollapsed ? 48 : explorerWidth;
+  const explorerDockedBelow = activeRail === "files" && explorerPlacement === "bottom";
+  const bottomFilesAvailable = Boolean(activeServer) && explorerPlacement === "bottom";
+  const activeBottomView = bottomFilesAvailable && bottomView === "files" ? "files" : "transfer";
+  const explorerPanelProps = {
+    server: activeServer,
+    servers,
+    activeServerId: activeConnectionId,
+    fileState: activeWorkspace ? {
+      path: activeWorkspace.directory,
+      entries: activeWorkspace.entries,
+      loading: activeWorkspace.filesLoading,
+      error: activeWorkspace.filesError,
+    } : null,
+    metrics: activeWorkspace?.metrics || null,
+    sampledAt: activeWorkspace?.sampledAt || "尚未采样",
+    monitorLoading: activeWorkspace?.monitorLoading,
+    monitorError: activeWorkspace?.monitorError,
+    monitorIntervalSeconds,
+    onMonitorIntervalChange: setMonitorIntervalSeconds,
+    onUpload: uploadFiles,
+    onSelectUploadFiles: selectUploadFiles,
+    onNativeDragDropSubscribe: client.events.onDragDrop,
+    onDownloadRemoteFile: downloadRemoteFile,
+    onRenameRemoteEntry: renameRemoteEntry,
+    onDeleteRemoteEntry: deleteRemoteEntry,
+    onCreateRemoteEntry: createRemoteEntry,
+    onOpenTextFile: openRemoteTextFile,
+    onRefresh: () => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory),
+    onNavigate: (path) => void loadDirectory(activeConnectionId, path),
+    onListDirectory: listRemoteDirectory,
+    onPlacementChange: changeExplorerPlacement,
+    onToggleCollapsed: () => setExplorerCollapsed((value) => !value),
+    onSelectServer: selectServer,
+    onOpenConnections: openConnections,
+  };
 
   if (loading || !uiPreferencesReady) {
     return <main className="native-startup-state" role="status"><HardDrives size={34} weight="duotone" /><strong>正在加载本机连接配置…</strong></main>;
@@ -961,7 +1227,7 @@ export function NativeApp() {
           onSelectServer={selectServer}
           onAddServer={() => openConnections("new")}
           onToggleRail={() => setRailExpanded((value) => !value)}
-          onOpenMonitor={() => activeServer && openBottomTab("monitor")}
+          onOpenMonitor={() => activeServer && setActiveRail("monitor")}
         />
         <ActivityRail
           activeItem={activeRail}
@@ -972,49 +1238,61 @@ export function NativeApp() {
           onThemeModeChange={setInterfaceThemeMode}
           onOpenSettings={() => setSettingsOpen(true)}
         />
-        <div className="workbench" style={{ "--explorer-w": `${explorerWidth}px` }}>
-          <ExplorerPanel
-            mode={activeServer ? activeRail : "connections"}
-            server={activeServer}
-            servers={servers}
-            activeServerId={activeConnectionId}
-            fileState={activeWorkspace ? {
-              path: activeWorkspace.directory,
-              entries: activeWorkspace.entries,
-              loading: activeWorkspace.filesLoading,
-              error: activeWorkspace.filesError,
-            } : null}
-            onUpload={uploadFiles}
-            onSelectUploadFiles={selectUploadFiles}
-            onNativeDragDropSubscribe={client.events.onDragDrop}
-            onDownloadRemoteFile={downloadRemoteFile}
-            onRenameRemoteEntry={renameRemoteEntry}
-            onDeleteRemoteEntry={deleteRemoteEntry}
-            onRefresh={() => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory)}
-            onNavigate={(path) => void loadDirectory(activeConnectionId, path)}
-            onOpenBottomTab={openBottomTab}
-            onCreateSession={() => openConnections("list")}
-            onSelectServer={selectServer}
-            onOpenConnections={openConnections}
-          />
-          <WorkspaceResizeHandle
+        <div
+          className="workbench"
+          data-explorer-placement={explorerDockPlacement}
+          data-explorer-collapsed={explorerDockCollapsed ? "true" : "false"}
+          style={{ "--explorer-w": `${explorerDockWidth}px` }}
+        >
+          {!explorerDockedBelow && <ExplorerPanel
+            {...explorerPanelProps}
+            mode={activeRail}
+            layout={explorerDockPlacement}
+            collapsed={explorerDockCollapsed}
+          />}
+          {explorerDockPlacement !== "bottom" && !explorerDockCollapsed && <WorkspaceResizeHandle
             width={explorerWidth}
+            placement={explorerDockPlacement}
             onResize={setExplorerWidth}
             onReset={() => setExplorerWidth(DEFAULT_EXPLORER_WIDTH)}
-          />
+          />}
           {sessions.length ? (
             <Suspense fallback={<section className="terminal-pane native-empty-workspace" role="status">正在加载终端组件…</section>}>
               <NativeTerminalPane
                 client={client}
                 sessions={sessions}
                 activeSessionId={activeConnectionId}
+                documents={openDocuments}
+                activeDocumentKey={activeDocumentKey}
                 appearance={appearance}
                 commandAssistanceMode={commandAssistanceMode}
-                onSessionSelect={setActiveConnectionId}
+                onSessionSelect={(connectionId) => {
+                  setActiveDocumentKey(null);
+                  setActiveConnectionId(connectionId);
+                }}
                 onSessionAdd={() => openConnections("new")}
-                onSessionClose={closeWorkspace}
+                onSessionClose={(connectionId) => void closeWorkspace(connectionId)}
+                onDocumentSelect={selectRemoteDocument}
+                onDocumentClose={(key) => void closeRemoteDocument(key)}
+                onReconnect={reconnectWorkspace}
                 onTerminalError={onTerminalError}
-              />
+              >
+                {openDocuments.map((document) => (
+                  <RemoteTextEditor
+                    key={document.key}
+                    active={activeDocumentKey === document.key}
+                    client={client}
+                    document={document}
+                    appearance={appearance}
+                    onDirtyChange={updateRemoteDocumentDirty}
+                    onSaved={() => {
+                      const workspace = workspacesRef.current[document.connectionId];
+                      if (workspace?.directory) void loadDirectory(document.connectionId, workspace.directory);
+                    }}
+                    onError={(error) => addIssue(document.connectionId, `远程文件：${document.name}`, error?.message || "远程文本操作失败。", error?.code || "SFTP_TEXT_FAILED")}
+                  />
+                ))}
+              </NativeTerminalPane>
             </Suspense>
           ) : (
             <section className="terminal-pane native-empty-workspace">
@@ -1025,19 +1303,18 @@ export function NativeApp() {
             </section>
           )}
           {bottomVisible && activeServer && <BottomPanel
-            activeTab={activeBottomTab}
             collapsed={bottomCollapsed}
+            activeView={activeBottomView}
+            filesContent={bottomFilesAvailable ? <ExplorerPanel {...explorerPanelProps} mode="files" layout="bottom" embedded /> : null}
+            explorerPlacement={explorerPlacement}
             transfers={activeWorkspace?.transfers || []}
             servers={servers}
-            server={activeServer}
-            metrics={activeWorkspace?.metrics || null}
-            sampledAt={activeWorkspace?.sampledAt || "尚未采样"}
-            monitorLoading={activeWorkspace?.monitorLoading}
-            monitorError={activeWorkspace?.monitorError}
-            issues={activeWorkspace?.issues || []}
-            onTabChange={openBottomTab}
+            onViewChange={(view) => {
+              setBottomView(view);
+              setBottomCollapsed(false);
+            }}
+            onExplorerPlacementChange={changeExplorerPlacement}
             onToggle={() => setBottomCollapsed((value) => !value)}
-            onClose={() => setBottomVisible(false)}
             onResize={setBottomPanelHeight}
             onResetResize={() => setBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT)}
             onCancel={(transferId) => void client.sftp.cancel(transferId).catch((error) => addIssue(activeConnectionId, "取消传输失败", error.message, error.code))}
@@ -1067,10 +1344,21 @@ export function NativeApp() {
         onSubmit={submitSavedPassword}
       />
       <HostKeyDialog prompt={hostKeyPrompt} onAccept={acceptHostKey} onClose={closeHostKeyPrompt} />
+      <UploadConflictDialog
+        request={uploadConflictRequest}
+        onCancel={() => setUploadConflictRequest(null)}
+        onConfirm={confirmUploadConflict}
+      />
+      <UnsavedChangesDialog
+        request={unsavedChangesRequest}
+        onCancel={() => resolveUnsavedChangesConfirmation(false)}
+        onConfirm={() => resolveUnsavedChangesConfirmation(true)}
+      />
       <CloseRequestDialog
         open={closeRequestOpen}
         activeSessionCount={closeRequestActiveSessionCount}
         activeTransferCount={closeDialogActiveTransferCount}
+        unsavedDocuments={closeRequestDirtyDocuments}
         onResolve={resolveCloseRequest}
       />
       <SettingsDialog

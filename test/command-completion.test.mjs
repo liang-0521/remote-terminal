@@ -269,6 +269,19 @@ test("终端输入精确命中 ll 时继续显示精确项和可拼接前缀", (
   assert.equal(searchInlineCommandCompletions("查看文件", { completions: catalog })[0].command, "ls -lah");
 });
 
+test("行内自动提示最多返回五条，并随输入继续缩小候选", () => {
+  const catalog = buildCommandCompletionCatalog({
+    remoteCompletions: [
+      "deploy", "deploy-api", "deploy-web", "deploy-worker", "deploy-docs", "deploy-status", "describe",
+    ].map((command) => ({ command, source: "remote-command" })),
+  });
+
+  const broad = searchInlineCommandCompletions("de", { completions: catalog, limit: 5 });
+  const precise = searchInlineCommandCompletions("deploy-w", { completions: catalog, limit: 5 });
+  assert.equal(broad.length, 5);
+  assert.deepEqual(precise.map((item) => item.command), ["deploy-web", "deploy-worker"]);
+});
+
 test("当前输入已精确命中命令时，行内补全保留当前项和更长前缀项", () => {
   const catalog = buildCommandCompletionCatalog({
     remoteCompletions: [

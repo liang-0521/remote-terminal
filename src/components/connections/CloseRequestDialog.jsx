@@ -6,6 +6,7 @@ export function CloseRequestDialog({
   open,
   activeSessionCount = 0,
   activeTransferCount = 0,
+  unsavedDocuments = [],
   onResolve,
 }) {
   const [remember, setRemember] = useState(false);
@@ -97,6 +98,14 @@ export function CloseRequestDialog({
                 {activeSessionCount > 0 && activeTransferCount > 0 ? "、" : ""}
                 {activeTransferCount > 0 ? ` ${activeTransferCount} 个文件传输` : ""}
                 。后台运行不会中断；退出将关闭这些连接和任务。
+              </span>
+            </div>
+          )}
+          {unsavedDocuments.length > 0 && (
+            <div className="close-request-dialog__warning is-danger" role="alert">
+              <WarningCircle size={18} weight="duotone" />
+              <span>
+                有 {unsavedDocuments.length} 个文件尚未保存：{unsavedDocuments.join("、")}。后台运行会保留编辑内容；退出客户端将丢失这些修改。
               </span>
             </div>
           )}

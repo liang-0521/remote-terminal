@@ -28,8 +28,11 @@ const TAURI_COMMANDS = Object.freeze({
   commandHistoryRecord: "command_history_record",
   commandHistoryRemove: "command_history_remove",
   sftpList: "sftp_list",
+  sftpReadText: "sftp_read_text",
+  sftpWriteText: "sftp_write_text",
   sftpRemove: "sftp_remove",
   sftpRename: "sftp_rename",
+  sftpCreate: "sftp_create",
   sftpUpload: "sftp_upload",
   sftpDownloadToComputer: "sftp_download_to_computer",
   sftpCancel: "sftp_cancel",
@@ -159,7 +162,9 @@ function normalizeLocalPath(value) {
       "无法取得待上传文件的 Windows 绝对路径。请通过客户端文件选择器或原生拖放事件重新选择。",
     );
   }
-  return { localPath };
+  return value && typeof value === "object" && value.overwrite
+    ? { localPath, overwrite: true }
+    : { localPath };
 }
 
 function normalizeDirectoryPath(value) {
@@ -482,6 +487,18 @@ function createTauriClient(api) {
     }),
     sftp: Object.freeze({
       list: (sessionId, path) => call(TAURI_COMMANDS.sftpList, { sessionId, path }),
+      readText: (sessionId, path, offset = null) => (
+        call(TAURI_COMMANDS.sftpReadText, { sessionId, path, offset })
+      ),
+      writeText: (sessionId, path, content, revision) => (
+        call(TAURI_COMMANDS.sftpWriteText, {
+          sessionId,
+          path,
+          content,
+          expectedSize: revision.size,
+          expectedModifiedAt: revision.modifiedAt || null,
+        })
+      ),
       remove: (sessionId, path, expectedEntryType) => (
         call(TAURI_COMMANDS.sftpRemove, { sessionId, path, expectedEntryType })
       ),
@@ -492,6 +509,9 @@ function createTauriClient(api) {
           targetPath,
           expectedEntryType,
         })
+      ),
+      create: (sessionId, directory, name, entryType) => (
+        call(TAURI_COMMANDS.sftpCreate, { sessionId, directory, name, entryType })
       ),
       upload: (sessionId, remoteDirectory, files) => {
         const preparedFiles = prepareTauriFiles(files);

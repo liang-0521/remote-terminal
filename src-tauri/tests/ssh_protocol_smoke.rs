@@ -294,6 +294,7 @@ fn real_ssh_sftp_protocol_smoke() {
                         .to_str()
                         .expect("Unicode local upload path")
                         .to_string(),
+                    overwrite: false,
                 }],
             )
             .await
@@ -325,11 +326,33 @@ fn real_ssh_sftp_protocol_smoke() {
                         .to_str()
                         .expect("Unicode local upload path")
                         .to_string(),
+                    overwrite: false,
                 }],
             )
             .await
-            .expect_err("an existing remote target must not be overwritten");
-        assert_eq!(overwrite.code, "REMOTE_FILE_EXISTS");
+            .expect("an existing target remains visible as a failed transfer");
+        assert_eq!(overwrite[0].state, TransferState::Failed);
+        assert_eq!(
+            overwrite[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("REMOTE_FILE_EXISTS")
+        );
+
+        let replacement = manager
+            .upload_files(
+                &connected.session_id,
+                "/home/root/releases",
+                vec![UploadFile {
+                    local_path: upload_path
+                        .to_str()
+                        .expect("Unicode local upload path")
+                        .to_string(),
+                    overwrite: true,
+                }],
+            )
+            .await
+            .expect("confirmed overwrite upload should queue");
+        assert_eq!(replacement[0].state, TransferState::Queued);
+        wait_for_transfer(&sink, &replacement[0].id, "success").await;
 
         let renamed_file = manager
             .rename_remote_entry(

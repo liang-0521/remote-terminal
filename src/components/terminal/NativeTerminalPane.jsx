@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ClockCounterClockwise,
+  FileText,
   MagnifyingGlass,
   Plus,
   Terminal as TerminalIcon,
@@ -26,56 +27,81 @@ import {
 } from "../../services/command-completion.js";
 import { IconButton } from "../shared/IconButton.jsx";
 
+const INLINE_COMPLETION_LIMIT = 5;
+
 export function NativeTerminalPane({
   client,
   sessions,
   activeSessionId,
+  documents = [],
+  activeDocumentKey = null,
   appearance,
   commandAssistanceMode = "auto",
   onSessionSelect,
   onSessionAdd,
   onSessionClose,
+  onDocumentSelect,
+  onDocumentClose,
+  onReconnect,
   onTerminalError,
+  children,
 }) {
-  const tabRefs = useRef([]);
+  const tabRefs = useRef(new Map());
   const keyboardTabTargetRef = useRef(null);
+  const workspaceTabs = useMemo(() => [
+    ...sessions.map((session) => ({ key: `session:${session.id}`, type: "session", value: session })),
+    ...documents.map((document) => ({ key: `document:${document.key}`, type: "document", value: document })),
+  ], [documents, sessions]);
+  const activeTabKey = activeDocumentKey
+    ? `document:${activeDocumentKey}`
+    : `session:${activeSessionId}`;
 
   useEffect(() => {
-    const targetId = keyboardTabTargetRef.current;
-    if (!targetId || targetId !== activeSessionId) return undefined;
-    const targetIndex = sessions.findIndex((session) => session.id === targetId);
-    if (targetIndex < 0) {
+    const targetKey = keyboardTabTargetRef.current;
+    if (!targetKey || targetKey !== activeTabKey) return undefined;
+    if (!tabRefs.current.has(targetKey)) {
       keyboardTabTargetRef.current = null;
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
-      tabRefs.current[targetIndex]?.focus();
+      tabRefs.current.get(targetKey)?.focus();
       keyboardTabTargetRef.current = null;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSessionId, sessions]);
+  }, [activeTabKey, workspaceTabs]);
 
-  function selectRelativeSession(event, currentIndex) {
+  function activateTab(tab) {
+    if (tab.type === "session") {
+      onDocumentSelect?.(null);
+      onSessionSelect(tab.value.id);
+      return;
+    }
+    onDocumentSelect?.(tab.value.key);
+  }
+
+  function selectRelativeTab(event, currentIndex) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
-        ? sessions.length - 1
-        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + sessions.length) % sessions.length;
-    const nextSession = sessions[nextIndex];
-    if (!nextSession) return;
-    keyboardTabTargetRef.current = nextSession.id;
-    onSessionSelect(nextSession.id);
+        ? workspaceTabs.length - 1
+        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + workspaceTabs.length) % workspaceTabs.length;
+    const nextTab = workspaceTabs[nextIndex];
+    if (!nextTab) return;
+    keyboardTabTargetRef.current = nextTab.key;
+    activateTab(nextTab);
   }
 
-  function selectNextSession(event) {
-    if (!event.ctrlKey || event.altKey || event.metaKey || event.key !== "Tab" || sessions.length < 2) return;
+  function selectNextWorkspaceTab(event) {
+    if (!event.ctrlKey || event.altKey || event.metaKey || event.key !== "Tab" || workspaceTabs.length < 2) return;
     event.preventDefault();
     event.stopPropagation();
-    const currentIndex = Math.max(0, sessions.findIndex((session) => session.id === activeSessionId));
+    const currentIndex = Math.max(0, workspaceTabs.findIndex((tab) => tab.key === activeTabKey));
     const delta = event.shiftKey ? -1 : 1;
-    onSessionSelect(sessions[(currentIndex + delta + sessions.length) % sessions.length].id);
+    const nextTab = workspaceTabs[(currentIndex + delta + workspaceTabs.length) % workspaceTabs.length];
+    keyboardTabTargetRef.current = nextTab.key;
+    activateTab(nextTab);
   }
 
   return (
@@ -85,17 +111,23 @@ export function NativeTerminalPane({
         "--terminal-background": appearance.terminalBackground,
         "--terminal-foreground": appearance.terminalForeground,
       }}
-      onKeyDownCapture={selectNextSession}
+      onKeyDownCapture={selectNextWorkspaceTab}
     >
-      <div className="terminal-tabs" role="tablist" aria-label="SSH 终端工作区">
-        {sessions.map((session, index) => {
-          const selected = activeSessionId === session.id;
-          const tabId = `terminal-tab-${session.id}`;
-          const panelId = `terminal-panel-${session.id}`;
+      <div className="terminal-tabs" role="tablist" aria-label="终端和远程文件工作区">
+        {workspaceTabs.map((tab, index) => {
+          const selected = activeTabKey === tab.key;
+          const isSession = tab.type === "session";
+          const item = tab.value;
+          const tabId = isSession ? `terminal-tab-${item.id}` : `document-tab-${item.key}`;
+          const panelId = isSession ? `terminal-panel-${item.id}` : `document-panel-${item.key}`;
+          const TabIcon = isSession ? TerminalIcon : FileText;
           return (
-            <div key={session.id} className={`terminal-tab ${selected ? "is-active" : ""}`}>
+            <div key={tab.key} className={`terminal-tab ${isSession ? "" : "is-document"} ${selected ? "is-active" : ""}`}>
               <button
-                ref={(element) => { tabRefs.current[index] = element; }}
+                ref={(element) => {
+                  if (element) tabRefs.current.set(tab.key, element);
+                  else tabRefs.current.delete(tab.key);
+                }}
                 id={tabId}
                 type="button"
                 role="tab"
@@ -103,14 +135,19 @@ export function NativeTerminalPane({
                 aria-selected={selected}
                 aria-controls={panelId}
                 tabIndex={selected ? 0 : -1}
-                onClick={() => onSessionSelect(session.id)}
-                onKeyDown={(event) => selectRelativeSession(event, index)}
+                onClick={() => activateTab(tab)}
+                onKeyDown={(event) => selectRelativeTab(event, index)}
               >
-                <TerminalIcon size={18} />
-                <span>{session.label}</span>
-                <i className={`status-dot status-dot--${session.state}`} aria-hidden="true" />
+                <TabIcon size={18} />
+                <span>{item.label || item.name}{item.dirty ? " •" : ""}</span>
+                {isSession && <i className={`status-dot status-dot--${item.state}`} aria-hidden="true" />}
               </button>
-              <button type="button" className="terminal-tab__close" aria-label={`关闭 ${session.label}`} onClick={() => onSessionClose(session.id)}>
+              <button
+                type="button"
+                className="terminal-tab__close"
+                aria-label={`关闭 ${item.label || item.name}`}
+                onClick={() => isSession ? onSessionClose(item.id) : onDocumentClose?.(item.key)}
+              >
                 <X size={15} />
               </button>
             </div>
@@ -119,7 +156,7 @@ export function NativeTerminalPane({
         <IconButton label="新增服务器工作区" onClick={onSessionAdd}><Plus size={21} /></IconButton>
       </div>
 
-      <div className="native-terminal-stack">
+      <div className={`native-terminal-stack ${activeDocumentKey ? "is-hidden" : ""}`} aria-hidden={Boolean(activeDocumentKey)}>
         {sessions.map((session) => (
           <div
             key={session.id}
@@ -139,30 +176,28 @@ export function NativeTerminalPane({
                 }}
               />
             )}
-            {session.sessionId && session.state === "connected" ? (
-              <XtermSurface
-                client={client}
-                sessionId={session.sessionId}
-                connectionId={session.id}
-                active={activeSessionId === session.id}
-                focusTerminalOnActivate={keyboardTabTargetRef.current !== session.id}
-                appearance={appearance}
-                commandAssistanceMode={commandAssistanceMode}
-                remoteCompletions={session.completionCatalog}
-                completionLoading={session.completionLoading}
-                completionError={session.completionError}
-                directoryEntries={session.directoryEntries}
-                onError={onTerminalError}
-              />
-            ) : (
-              <div className={`native-terminal-placeholder is-${session.state}`} role="status">
-                <TerminalIcon size={30} weight="duotone" />
-                <strong>{session.state === "connecting" ? "正在建立 SSH 会话…" : session.state === "error" ? "SSH 会话未建立" : "SSH 会话已断开"}</strong>
-                <span>{session.error || "请从连接管理器重新连接该服务器。"}</span>
-              </div>
-            )}
+            <XtermSurface
+              client={client}
+              sessionId={session.sessionId}
+              connectionId={session.id}
+              connectionState={session.state}
+              connectionError={session.error}
+              active={!activeDocumentKey && activeSessionId === session.id}
+              focusTerminalOnActivate={keyboardTabTargetRef.current !== `session:${session.id}`}
+              appearance={appearance}
+              commandAssistanceMode={commandAssistanceMode}
+              remoteCompletions={session.completionCatalog}
+              completionLoading={session.completionLoading}
+              completionError={session.completionError}
+              directoryEntries={session.directoryEntries}
+              onReconnect={onReconnect}
+              onError={onTerminalError}
+            />
           </div>
         ))}
+      </div>
+      <div className={`native-document-stack ${activeDocumentKey ? "is-active" : ""}`} aria-hidden={!activeDocumentKey}>
+        {children}
       </div>
     </section>
   );
@@ -172,6 +207,8 @@ function XtermSurface({
   client,
   sessionId,
   connectionId,
+  connectionState,
+  connectionError,
   active,
   focusTerminalOnActivate,
   appearance,
@@ -180,6 +217,7 @@ function XtermSurface({
   completionLoading,
   completionError,
   directoryEntries,
+  onReconnect,
   onError,
 }) {
   const containerRef = useRef(null);
@@ -188,6 +226,11 @@ function XtermSurface({
   const terminalWriteQueueRef = useRef(Promise.resolve());
   const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
+  const sessionIdRef = useRef(sessionId);
+  const connectionStateRef = useRef(connectionState);
+  const reconnectRef = useRef(onReconnect);
+  const onErrorRef = useRef(onError);
+  const lastConnectionNoticeRef = useRef("");
   const commandSearchInputRef = useRef(null);
   const completionCatalogRef = useRef([]);
   const inlineCompletionOpenRef = useRef(false);
@@ -225,7 +268,7 @@ function XtermSurface({
   ]);
   const inlineSuggestions = useMemo(
     () => terminalInput.reliable
-      ? searchInlineCommandCompletions(terminalInput.text, { completions: completionCatalog, limit: 10 })
+      ? searchInlineCommandCompletions(terminalInput.text, { completions: completionCatalog, limit: INLINE_COMPLETION_LIMIT })
       : [],
     [completionCatalog, terminalInput],
   );
@@ -247,6 +290,10 @@ function XtermSurface({
   suggestionsRef.current = inlineSuggestions;
   suggestionIndexRef.current = selectedSuggestionIndex;
   commandAssistanceModeRef.current = commandAssistanceMode;
+  sessionIdRef.current = sessionId;
+  connectionStateRef.current = connectionState;
+  reconnectRef.current = onReconnect;
+  onErrorRef.current = onError;
 
   const focusTerminalSoon = useCallback(() => {
     window.requestAnimationFrame(() => terminalRef.current?.focus());
@@ -263,7 +310,7 @@ function XtermSurface({
     const cellWidth = screenRect.width / terminal.cols;
     const lineHeight = screenRect.height / terminal.rows;
     const popoverWidth = Math.max(1, Math.min(420, slotRect.width - 16));
-    const popoverHeight = Math.max(38, Math.min(suggestionsRef.current.length, 10) * 36 + 2);
+    const popoverHeight = Math.max(38, Math.min(suggestionsRef.current.length, INLINE_COMPLETION_LIMIT) * 36 + 2);
     const nextAnchor = calculateInlineCompletionPosition({
       cursorLeft: screenRect.left - slotRect.left + (terminal.buffer.active.cursorX * cellWidth) + 2,
       cursorTop: screenRect.top - slotRect.top + (terminal.buffer.active.cursorY * lineHeight),
@@ -309,7 +356,7 @@ function XtermSurface({
     const nextState = advanceTerminalInputState(terminalInputRef.current, data);
     terminalInputRef.current = nextState;
     const nextSuggestions = nextState.reliable
-      ? searchInlineCommandCompletions(nextState.text, { completions: completionCatalogRef.current, limit: 10 })
+      ? searchInlineCommandCompletions(nextState.text, { completions: completionCatalogRef.current, limit: INLINE_COMPLETION_LIMIT })
       : [];
     suggestionsRef.current = nextSuggestions;
     suggestionIndexRef.current = 0;
@@ -327,10 +374,16 @@ function XtermSurface({
   }, [closeInlineCompletion, updateInlineAnchor]);
 
   const enqueueTerminalWrite = useCallback((data) => {
-    const request = terminalWriteQueueRef.current.then(() => client.terminal.write(sessionId, data));
+    const request = terminalWriteQueueRef.current.then(() => {
+      const currentSessionId = sessionIdRef.current;
+      if (!currentSessionId || connectionStateRef.current !== "connected") {
+        throw new Error("SSH 会话当前不可写。");
+      }
+      return client.terminal.write(currentSessionId, data);
+    });
     terminalWriteQueueRef.current = request.catch(() => undefined);
     return request;
-  }, [client, sessionId]);
+  }, [client]);
 
   const enqueueHistoryMutation = useCallback((operation) => {
     const request = historyMutationQueueRef.current.then(operation);
@@ -492,7 +545,7 @@ function XtermSurface({
     const copySelection = () => {
       const selection = terminal.getSelection();
       if (!selection) return;
-      void client.clipboard.writeText(selection).catch((error) => onError?.(error, connectionId));
+      void client.clipboard.writeText(selection).catch((error) => onErrorRef.current?.(error, connectionId));
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
@@ -519,7 +572,7 @@ function XtermSurface({
           .then((text) => {
             if (!disposed && text) terminal.paste(text);
           })
-          .catch((error) => onError?.(error, connectionId));
+          .catch((error) => onErrorRef.current?.(error, connectionId));
         return false;
       }
 
@@ -556,25 +609,25 @@ function XtermSurface({
       return true;
     });
 
-    let attaching = true;
-    const pendingData = [];
-    const unsubscribe = client.events.onTerminalData((event) => {
-      if (event?.sessionId !== sessionId || disposed) return;
-      if (attaching) pendingData.push(event.data);
-      else terminal.write(event.data, () => {
-        if (inlineCompletionOpenRef.current) updateInlineAnchor();
-      });
-    });
     const inputSubscription = terminal.onData((data) => {
+      if (connectionStateRef.current !== "connected" || !sessionIdRef.current) {
+        if (/[\r\n]/.test(data) && ["disconnected", "error"].includes(connectionStateRef.current)) {
+          terminal.write("\r\n");
+          reconnectRef.current?.(connectionId);
+        }
+        return;
+      }
       const executedCommands = collectExecutedTerminalCommands(terminalInputRef.current, data);
       trackTerminalInput(data);
       void enqueueTerminalWrite(data)
         .then(() => recordExecutedCommands(executedCommands))
-        .catch((error) => onError?.(error, connectionId));
+        .catch((error) => onErrorRef.current?.(error, connectionId));
     });
     const resizeSubscription = terminal.onResize(({ cols, rows }) => {
       if (!activeRef.current) return;
-      void client.terminal.resize(sessionId, { cols, rows }).catch((error) => onError?.(error, connectionId));
+      const currentSessionId = sessionIdRef.current;
+      if (!currentSessionId || connectionStateRef.current !== "connected") return;
+      void client.terminal.resize(currentSessionId, { cols, rows }).catch((error) => onErrorRef.current?.(error, connectionId));
     });
     const scrollSubscription = terminal.onScroll(() => {
       if (inlineCompletionOpenRef.current) updateInlineAnchor();
@@ -586,23 +639,8 @@ function XtermSurface({
     });
     resizeObserver.observe(element);
 
-    void client.terminal.attach(sessionId)
-      .then(({ initialData }) => {
-        if (disposed) return;
-        terminal.write(initialData);
-        for (const data of pendingData) terminal.write(data);
-        pendingData.length = 0;
-        attaching = false;
-        if (activeRef.current) {
-          fit.fit();
-          terminal.focus();
-        }
-      })
-      .catch((error) => onError?.(error, connectionId));
-
     return () => {
       disposed = true;
-      unsubscribe();
       resizeObserver.disconnect();
       scrollSubscription.dispose();
       resizeSubscription.dispose();
@@ -611,7 +649,59 @@ function XtermSurface({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, onError, recordExecutedCommands, sessionId, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal || !sessionId) return undefined;
+    let disposed = false;
+    let attaching = true;
+    const pendingData = [];
+    const unsubscribe = client.events.onTerminalData((event) => {
+      if (event?.sessionId !== sessionId || disposed) return;
+      if (attaching) pendingData.push(event.data);
+      else terminal.write(event.data, () => {
+        if (inlineCompletionOpenRef.current) updateInlineAnchor();
+      });
+    });
+    void client.terminal.attach(sessionId)
+      .then(({ initialData }) => {
+        if (disposed) return;
+        terminal.write(initialData);
+        for (const data of pendingData) terminal.write(data);
+        pendingData.length = 0;
+        attaching = false;
+        if (activeRef.current) {
+          fitRef.current?.fit();
+          terminal.focus();
+        }
+      })
+      .catch((error) => onErrorRef.current?.(error, connectionId));
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [client, connectionId, sessionId, updateInlineAnchor]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const noticeKey = `${connectionState}:${connectionError || ""}`;
+    if (lastConnectionNoticeRef.current === noticeKey) return;
+    lastConnectionNoticeRef.current = noticeKey;
+    closeInlineCompletion();
+    const nextInput = createTerminalInputState();
+    terminalInputRef.current = nextInput;
+    setTerminalInput(nextInput);
+    if (connectionState === "connecting") {
+      terminal.write("\r\n\x1b[36m正在重新连接…\x1b[0m\r\n");
+      return;
+    }
+    if (connectionState === "disconnected" || connectionState === "error") {
+      const detail = connectionError ? `：${connectionError}` : "";
+      terminal.write(`\r\n\x1b[33m连接断开${detail}\x1b[0m\r\n\x1b[32m按 Enter 重新连接\x1b[0m\r\n`);
+    }
+  }, [closeInlineCompletion, connectionError, connectionState]);
 
   return (
     <>

@@ -1,51 +1,21 @@
-import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CaretDown,
   CaretUp,
   CheckCircle,
   FileText,
-  Info,
-  WarningCircle,
-  X,
 } from "@phosphor-icons/react";
 import { IconButton } from "../shared/IconButton.jsx";
-import { MonitorErrorBoundary } from "../monitoring/MonitorErrorBoundary.js";
-
-function createLazyMonitorDashboard() {
-  return lazy(() => import("../monitoring/MonitorDashboard.jsx")
-    .then(({ MonitorDashboard: component }) => ({ default: component })));
-}
-
-const TABS = [
-  { id: "transfer", label: "传输" },
-  { id: "issues", label: "问题" },
-  { id: "monitor", label: "监控" },
-];
 
 const MIN_PANEL_HEIGHT = 120;
 const MAX_PANEL_HEIGHT_RATIO = 0.45;
 
-export function BottomPanel({ activeTab, collapsed, transfers, servers, server, metrics, sampledAt, monitorLoading = false, monitorError = "", issues = [], onTabChange, onToggle, onClose, onResize, onResetResize, onCancel, onRetry }) {
+export function BottomPanel({ collapsed, activeView = "transfer", filesContent = null, explorerPlacement = "bottom", transfers, servers, onViewChange, onExplorerPlacementChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
   const dragState = useRef(null);
   const panelRef = useRef(null);
-  const tabRefs = useRef([]);
-  const panelId = useId();
   const [panelHeight, setPanelHeight] = useState(MIN_PANEL_HEIGHT);
-  const [monitorView, setMonitorView] = useState(() => ({
-    component: createLazyMonitorDashboard(),
-    attempt: 0,
-  }));
   const maxPanelHeight = Math.max(MIN_PANEL_HEIGHT, Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO));
   const announcedPanelHeight = Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight));
-  const MonitorDashboard = monitorView.component;
-  const monitorResetKey = `${server?.id || "no-server"}:${sampledAt}:${monitorView.attempt}`;
-
-  function retryMonitor() {
-    setMonitorView((current) => ({
-      component: createLazyMonitorDashboard(),
-      attempt: current.attempt + 1,
-    }));
-  }
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -86,20 +56,6 @@ export function BottomPanel({ activeTab, collapsed, transfers, servers, server, 
     onResize(Math.round(Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight + delta))));
   }
 
-  function handleTabKeyDown(event, currentIndex) {
-    const previous = ["ArrowLeft", "ArrowUp"].includes(event.key);
-    const next = ["ArrowRight", "ArrowDown"].includes(event.key);
-    if (!previous && !next && !["Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const nextIndex = event.key === "Home"
-      ? 0
-      : event.key === "End"
-        ? TABS.length - 1
-        : (currentIndex + (next ? 1 : -1) + TABS.length) % TABS.length;
-    onTabChange(TABS[nextIndex].id);
-    window.requestAnimationFrame(() => tabRefs.current[nextIndex]?.focus());
-  }
-
   return (
     <section ref={panelRef} className={`bottom-panel ${collapsed ? "is-collapsed" : ""}`}>
       {!collapsed && <div
@@ -120,26 +76,22 @@ export function BottomPanel({ activeTab, collapsed, transfers, servers, server, 
         onPointerCancel={endResize}
       />}
       <div className="bottom-panel__tabs">
-        <div role="tablist" aria-label="底部面板">
-          {TABS.map((tab, index) => (
-            <button
-              ref={(element) => { tabRefs.current[index] = element; }}
-              id={`${panelId}-tab-${tab.id}`}
-              key={tab.id}
-              type="button"
-              role="tab"
-              className={activeTab === tab.id ? "is-active" : ""}
-              aria-controls={`${panelId}-content`}
-              aria-selected={activeTab === tab.id}
-              tabIndex={activeTab === tab.id ? 0 : -1}
-              onClick={() => onTabChange(tab.id)}
-              onKeyDown={(event) => handleTabKeyDown(event, index)}
-            >
-              {tab.label}{tab.badge ? <span className="tab-badge">{tab.badge}</span> : null}
-            </button>
-          ))}
+        <div className="bottom-panel__views" role={filesContent ? "tablist" : undefined} aria-label={filesContent ? "底部面板" : undefined}>
+          {filesContent && (
+            <button type="button" role="tab" aria-selected={activeView === "files"} className={activeView === "files" ? "is-active" : ""} onClick={() => onViewChange?.("files")}>远程文件</button>
+          )}
+          <button type="button" role={filesContent ? "tab" : undefined} aria-selected={filesContent ? activeView === "transfer" : undefined} className={activeView === "transfer" ? "is-active" : ""} onClick={() => onViewChange?.("transfer")}>
+            传输任务 <span className="tab-badge">{transfers.length}</span>
+          </button>
         </div>
-        <span>
+        <span className="bottom-panel__actions">
+          {filesContent && activeView === "files" && (
+            <span className="explorer-placement" role="group" aria-label="资源管理器位置">
+              {[["left", "左"], ["bottom", "下"], ["right", "右"]].map(([value, label]) => (
+                <button key={value} type="button" aria-pressed={explorerPlacement === value} onClick={() => onExplorerPlacementChange?.(value)}>{label}</button>
+              ))}
+            </span>
+          )}
           <IconButton
             label={collapsed ? "展开面板" : "收起面板"}
             data-icon-direction={collapsed ? "up" : "down"}
@@ -147,32 +99,18 @@ export function BottomPanel({ activeTab, collapsed, transfers, servers, server, 
           >
             {collapsed ? <CaretUp size={18} /> : <CaretDown size={18} />}
           </IconButton>
-          <IconButton label="关闭面板" onClick={onClose}><X size={18} /></IconButton>
         </span>
       </div>
       {!collapsed && (
-        <div
-          id={`${panelId}-content`}
-          className="bottom-panel__content"
-          role="tabpanel"
-          aria-labelledby={`${panelId}-tab-${activeTab}`}
-          tabIndex={0}
-        >
-          {activeTab === "transfer" && <TransferView transfers={transfers} servers={servers} onCancel={onCancel} onRetry={onRetry} />}
-          {activeTab === "issues" && <IssuesView issues={issues} />}
-          {activeTab === "monitor" && (
-            <MonitorErrorBoundary resetKey={monitorResetKey} onRetry={retryMonitor}>
-              <Suspense fallback={<div className="monitor-dashboard monitor-dashboard--empty" role="status">正在加载监控视图…</div>}>
-                <MonitorDashboard server={server} metrics={metrics} sampledAt={sampledAt} loading={monitorLoading} error={monitorError} />
-              </Suspense>
-            </MonitorErrorBoundary>
-          )}
+        <div className={`bottom-panel__content is-${activeView}`} role="region" aria-label={activeView === "files" ? "远程文件列表" : "传输任务列表"} tabIndex={0}>
+          {activeView === "files" && filesContent
+            ? filesContent
+            : <TransferView transfers={transfers} servers={servers} onCancel={onCancel} onRetry={onRetry} />}
         </div>
       )}
     </section>
   );
 }
-
 function TransferView({ transfers, servers, onCancel, onRetry }) {
   return (
     <div className="transfer-table" role="table" aria-label="传输任务" aria-colcount={8}>
@@ -212,16 +150,6 @@ function TransferView({ transfers, servers, onCancel, onRetry }) {
         </div>;
       })}
       </div>
-    </div>
-  );
-}
-
-function IssuesView({ issues }) {
-  return (
-    <div className="issues-list">
-      {issues.length ? issues.map((issue) => (
-        <div key={issue.id}><WarningCircle size={20} /><span><strong>{issue.title}</strong><small>{issue.detail}</small></span></div>
-      )) : <div><Info size={20} /><span><strong>当前没有问题</strong><small>连接、传输与采样错误会显示在这里。</small></span></div>}
     </div>
   );
 }

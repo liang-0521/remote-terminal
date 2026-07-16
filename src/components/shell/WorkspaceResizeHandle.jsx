@@ -10,7 +10,7 @@ function clampWidth(width, workbenchWidth) {
   return Math.round(Math.min(MAX_EXPLORER_WIDTH, availableMaximum, Math.max(MIN_EXPLORER_WIDTH, width)));
 }
 
-export function WorkspaceResizeHandle({ width, onResize, onReset }) {
+export function WorkspaceResizeHandle({ width, placement = "left", onResize, onReset }) {
   const dragState = useRef(null);
 
   function getWorkbenchWidth(element) {
@@ -28,7 +28,8 @@ export function WorkspaceResizeHandle({ width, onResize, onReset }) {
 
   function resize(event) {
     if (!dragState.current) return;
-    const nextWidth = dragState.current.startWidth + event.clientX - dragState.current.startX;
+    const direction = placement === "right" ? -1 : 1;
+    const nextWidth = dragState.current.startWidth + direction * (event.clientX - dragState.current.startX);
     onResize(clampWidth(nextWidth, dragState.current.workbenchWidth));
   }
 
@@ -47,13 +48,13 @@ export function WorkspaceResizeHandle({ width, onResize, onReset }) {
       ? MIN_EXPLORER_WIDTH
       : event.key === "End"
         ? MAX_EXPLORER_WIDTH
-        : width + (event.key === "ArrowRight" ? 16 : -16);
+        : width + (event.key === (placement === "right" ? "ArrowLeft" : "ArrowRight") ? 16 : -16);
     onResize(clampWidth(nextWidth, workbenchWidth));
   }
 
   return (
     <div
-      className="explorer-resize-handle"
+      className={`explorer-resize-handle explorer-resize-handle--${placement}`}
       role="separator"
       aria-label="调整资源管理器宽度"
       aria-orientation="vertical"

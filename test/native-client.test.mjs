@@ -61,6 +61,11 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
   await client.terminal.history.record("server-1", "ls -lah");
   await client.terminal.history.remove("server-1", "ls -lah");
   await client.sftp.list("session-1", "/root");
+  await client.sftp.readText("session-1", "/var/log/app.log", 128);
+  await client.sftp.writeText("session-1", "/root/deploy.sh", "#!/bin/sh\n", {
+    size: 8,
+    modifiedAt: "2026-07-16T00:00:00Z",
+  });
   await client.sftp.remove("session-1", "/root/old.log", "file");
   await client.sftp.rename(
     "session-1",
@@ -68,6 +73,7 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
     "/root/archive/release.zip",
     "file",
   );
+  await client.sftp.create("session-1", "/root", "notes.txt", "file");
   await client.monitor.sample("session-1");
 
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
@@ -97,6 +103,22 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
     { type: "invoke", command: "sftp_list", args: { sessionId: "session-1", path: "/root" } },
     {
       type: "invoke",
+      command: "sftp_read_text",
+      args: { sessionId: "session-1", path: "/var/log/app.log", offset: 128 },
+    },
+    {
+      type: "invoke",
+      command: "sftp_write_text",
+      args: {
+        sessionId: "session-1",
+        path: "/root/deploy.sh",
+        content: "#!/bin/sh\n",
+        expectedSize: 8,
+        expectedModifiedAt: "2026-07-16T00:00:00Z",
+      },
+    },
+    {
+      type: "invoke",
       command: "sftp_remove",
       args: { sessionId: "session-1", path: "/root/old.log", expectedEntryType: "file" },
     },
@@ -109,6 +131,11 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
         targetPath: "/root/archive/release.zip",
         expectedEntryType: "file",
       },
+    },
+    {
+      type: "invoke",
+      command: "sftp_create",
+      args: { sessionId: "session-1", directory: "/root", name: "notes.txt", entryType: "file" },
     },
     { type: "invoke", command: "monitor_sample", args: { sessionId: "session-1" } },
   ]);
@@ -259,11 +286,14 @@ test("Tauri 关闭策略保持持久化命令和关闭请求事件契约", async
       wallpaperOpacity: 0.22,
     },
     explorerWidth: 360,
+    explorerPlacement: "right",
+    explorerCollapsed: true,
     railExpanded: true,
     bottomVisible: true,
     bottomCollapsed: false,
     bottomPanelHeight: 300,
     commandAssistanceMode: "shortcut",
+    monitorIntervalSeconds: 10,
   };
   await client.app.getUiPreferences();
   await client.app.setUiPreferences(preferences);
@@ -291,7 +321,7 @@ test("Tauri 上传只接受原生来源的 Windows 绝对路径", async () => {
 
   await client.sftp.upload("session-1", "/root", [
     "D:\\release\\app.zip",
-    { localPath: "\\\\fileserver\\share\\notes.txt" },
+    { localPath: "\\\\fileserver\\share\\notes.txt", overwrite: true },
   ]);
   assert.deepEqual(api.calls.at(-1), {
     type: "invoke",
@@ -301,7 +331,7 @@ test("Tauri 上传只接受原生来源的 Windows 绝对路径", async () => {
       remoteDirectory: "/root",
       files: [
         { localPath: "D:\\release\\app.zip" },
-        { localPath: "\\\\fileserver\\share\\notes.txt" },
+        { localPath: "\\\\fileserver\\share\\notes.txt", overwrite: true },
       ],
     },
   });

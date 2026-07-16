@@ -9,8 +9,9 @@ use crate::{
     lifecycle,
     ssh::{
         download_file_name_for_dialog, CompletionItem, DirectoryListing, DisconnectResult,
-        RemoteEntryRemoval, RemoteEntryRename, TerminalAttachResult, TerminalDimensions,
-        TransferSummary, UploadFile,
+        RemoteEntryCreation, RemoteEntryRemoval, RemoteEntryRename, RemoteTextChunk,
+        RemoteTextWriteResult, TerminalAttachResult, TerminalDimensions, TransferSummary,
+        UploadFile,
     },
     state::{AppState, CloseBehavior, DataDirectoryStatus, UiPreferences},
     storage::{Connection, ConnectionDraft, ConnectionRemoval},
@@ -299,6 +300,36 @@ pub async fn sftp_list(
 }
 
 #[tauri::command]
+pub async fn sftp_read_text(
+    session_id: String,
+    path: String,
+    offset: Option<u64>,
+    state: State<'_, BackendState>,
+) -> AppResult<RemoteTextChunk> {
+    state.read_remote_text(&session_id, &path, offset).await
+}
+
+#[tauri::command]
+pub async fn sftp_write_text(
+    session_id: String,
+    path: String,
+    content: String,
+    expected_size: u64,
+    expected_modified_at: Option<String>,
+    state: State<'_, BackendState>,
+) -> AppResult<RemoteTextWriteResult> {
+    state
+        .write_remote_text(
+            &session_id,
+            &path,
+            &content,
+            expected_size,
+            expected_modified_at.as_deref(),
+        )
+        .await
+}
+
+#[tauri::command]
 pub async fn sftp_remove(
     session_id: String,
     path: String,
@@ -325,6 +356,19 @@ pub async fn sftp_rename(
             &target_path,
             &expected_entry_type,
         )
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_create(
+    session_id: String,
+    directory: String,
+    name: String,
+    entry_type: String,
+    state: State<'_, BackendState>,
+) -> AppResult<RemoteEntryCreation> {
+    state
+        .create_remote_entry(&session_id, &directory, &name, &entry_type)
         .await
 }
 

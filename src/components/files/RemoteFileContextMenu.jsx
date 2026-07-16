@@ -1,9 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowsClockwise,
   CircleNotch,
   CloudArrowDown,
+  FileMagnifyingGlass,
+  FilePlus,
   FolderOpen,
+  FolderPlus,
   PencilSimple,
   Trash,
 } from "@phosphor-icons/react";
@@ -16,9 +20,21 @@ export function RemoteFileContextMenu({
   onDownload,
   onRename,
   onDelete,
+  onCreateFile,
+  onCreateDirectory,
   onRefresh,
 }) {
   const menuRef = useRef(null);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+
+  useLayoutEffect(() => {
+    if (!request || !menuRef.current) return;
+    const margin = 8;
+    const menu = menuRef.current;
+    const left = Math.max(margin, Math.min(request.x, window.innerWidth - menu.offsetWidth - margin));
+    const top = Math.max(margin, Math.min(request.y, window.innerHeight - menu.offsetHeight - margin));
+    setPosition({ left, top });
+  }, [request]);
 
   useEffect(() => {
     if (!request) return undefined;
@@ -47,13 +63,13 @@ export function RemoteFileContextMenu({
     buttons[next]?.focus();
   }
 
-  return (
+  return createPortal((
     <div
       ref={menuRef}
       className="remote-file-context-menu"
       role="menu"
       aria-label={`${request.entry.name} 的远程文件操作`}
-      style={{ left: request.x, top: request.y }}
+      style={{ ...position, maxHeight: "calc(100vh - 16px)", overflowY: "auto" }}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
@@ -65,10 +81,16 @@ export function RemoteFileContextMenu({
       }}
     >
       <div className="remote-file-context-menu__title" title={request.entry.name}>{request.entry.name}</div>
-      {onOpen && (
+      {onOpen && !fileEntry && (
         <button type="button" role="menuitem" onClick={() => { onClose(); onOpen(); }}>
           <FolderOpen size={16} />
           <span>{parentEntry ? "返回上级目录" : "打开目录"}</span>
+        </button>
+      )}
+      {fileEntry && (
+        <button type="button" role="menuitem" onClick={() => { onClose(); onOpen?.(); }}>
+          <FileMagnifyingGlass size={16} />
+          <span>预览 / 编辑</span>
         </button>
       )}
       {fileEntry && (
@@ -96,10 +118,19 @@ export function RemoteFileContextMenu({
         </>
       )}
       <div className="remote-file-context-menu__separator" role="separator" />
+      <button type="button" role="menuitem" onClick={() => { onClose(); onCreateFile(); }}>
+        <FilePlus size={16} />
+        <span>新建文件…</span>
+      </button>
+      <button type="button" role="menuitem" onClick={() => { onClose(); onCreateDirectory(); }}>
+        <FolderPlus size={16} />
+        <span>新建文件夹…</span>
+      </button>
+      <div className="remote-file-context-menu__separator" role="separator" />
       <button type="button" role="menuitem" onClick={() => { onClose(); onRefresh(); }}>
         <ArrowsClockwise size={16} />
         <span>刷新</span>
       </button>
     </div>
-  );
+  ), document.querySelector(".app-root") || document.body);
 }
