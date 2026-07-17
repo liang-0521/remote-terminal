@@ -1,6 +1,6 @@
 [package]
 name = "remote-terminal"
-version = "0.5.1"
+version = "0.5.2"
 description = "Windows-native shell for Remote Terminal"
 authors = ["Liang"]
 edition = "2021"

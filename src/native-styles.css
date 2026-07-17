@@ -455,17 +455,26 @@
 
 .remote-file-context-menu,
 .terminal-context-menu {
+  --context-menu-surface: #fff;
+  --context-menu-border: #c3ccd9;
+  --context-menu-text: #253044;
+  --context-menu-text-strong: #111827;
+  --context-menu-text-muted: #70798a;
+  --context-menu-separator: #d6dce6;
+  --context-menu-hover: rgb(111 93 194 / 12%);
+  --context-menu-danger: #c43d4d;
+  --context-menu-shadow: rgb(0 0 0 / 24%);
   position: fixed;
   z-index: 150;
   display: grid;
   width: 224px;
   padding: 6px;
   overflow: hidden;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--context-menu-border);
   border-radius: 7px;
-  color: var(--text-primary);
-  background: rgb(8 23 38 / 98%);
-  box-shadow: 0 14px 36px rgb(0 0 0 / 46%);
+  color: var(--context-menu-text);
+  background: var(--context-menu-surface);
+  box-shadow: 0 14px 36px var(--context-menu-shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -473,7 +482,7 @@
 .terminal-context-menu__title {
   padding: 7px 9px 8px;
   overflow: hidden;
-  color: var(--text-muted);
+  color: var(--context-menu-text-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10px;
@@ -489,7 +498,7 @@
   padding: 0 9px;
   border: 0;
   border-radius: 5px;
-  color: var(--text-primary);
+  color: var(--context-menu-text);
   text-align: left;
   background: transparent;
   cursor: pointer;
@@ -500,12 +509,12 @@
 .terminal-context-menu > button:hover,
 .terminal-context-menu > button:focus-visible {
   outline: none;
-  color: var(--text-strong);
-  background: rgb(157 132 248 / 12%);
+  color: var(--context-menu-text-strong);
+  background: var(--context-menu-hover);
 }
 
 .remote-file-context-menu > button.is-danger {
-  color: #ffada9;
+  color: var(--context-menu-danger);
 }
 
 .remote-file-context-menu > button.is-danger:hover,
@@ -523,7 +532,7 @@
 .terminal-context-menu__separator {
   height: 1px;
   margin: 5px 3px;
-  background: var(--border-default);
+  background: var(--context-menu-separator);
 }
 
 .terminal-context-menu {
@@ -539,7 +548,7 @@
 }
 
 .terminal-context-menu kbd {
-  color: var(--text-muted);
+  color: var(--context-menu-text-muted);
   font: 10px var(--font-mono);
 }
 

@@ -133,3 +133,18 @@ test("终端菜单绑定触发会话的选区快照且不破坏 Ctrl+C 中断语
   assert.match(menuSource, /event\.key === "Tab"/);
   assert.equal(menuSource.match(/tabIndex=\{-1\}/g)?.length, 3);
 });
+
+test("终端右键菜单在明暗界面中都保持白底深色文字", async () => {
+  const styleUrl = new URL("../src/native-styles.css", import.meta.url);
+  const styleSource = await readFile(styleUrl, "utf8");
+  const contextMenuRule = styleSource.match(
+    /\.remote-file-context-menu,\s*\.terminal-context-menu\s*\{([^}]+)\}/,
+  );
+
+  assert.ok(contextMenuRule, "应存在终端右键菜单样式");
+  assert.match(contextMenuRule[1], /--context-menu-surface:\s*#fff/);
+  assert.match(contextMenuRule[1], /--context-menu-text:\s*#253044/);
+  assert.match(contextMenuRule[1], /background:\s*var\(--context-menu-surface\)/);
+  assert.match(contextMenuRule[1], /box-shadow:\s*0 14px 36px var\(--context-menu-shadow\)/);
+  assert.doesNotMatch(contextMenuRule[1], /surface-completion-native|terminal-background/);
+});

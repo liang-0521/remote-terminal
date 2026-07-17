@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("v0.5.1 发布版本在 Web、Rust 与 Tauri 元数据中保持一致", () => {
+test("v0.5.2 发布版本在 Web、Rust 与 Tauri 元数据中保持一致", () => {
   const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
   const packageLock = JSON.parse(readFileSync("package-lock.json", "utf8"));
   const tauriConfig = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
   const cargoToml = readFileSync("src-tauri/Cargo.toml", "utf8");
   const cargoLock = readFileSync("src-tauri/Cargo.lock", "utf8");
 
-  assert.equal(packageJson.version, "0.5.1");
-  assert.equal(packageLock.version, "0.5.1");
-  assert.equal(packageLock.packages[""].version, "0.5.1");
-  assert.equal(tauriConfig.version, "0.5.1");
-  assert.match(cargoToml, /^version = "0\.5\.1"$/m);
-  assert.match(cargoLock, /\[\[package\]\]\r?\nname = "remote-terminal"\r?\nversion = "0\.5\.1"/);
+  assert.equal(packageJson.version, "0.5.2");
+  assert.equal(packageLock.version, "0.5.2");
+  assert.equal(packageLock.packages[""].version, "0.5.2");
+  assert.equal(tauriConfig.version, "0.5.2");
+  assert.match(cargoToml, /^version = "0\.5\.2"$/m);
+  assert.match(cargoLock, /\[\[package\]\]\r?\nname = "remote-terminal"\r?\nversion = "0\.5\.2"/);
 });
 
 test("Windows 发布配置不再要求 Authenticode 证书", () => {
@@ -38,8 +38,8 @@ test("发布工作流不预检或复验 Authenticode", () => {
 test("发布仍强制 updater 签名和 SHA-256 校验", () => {
   const workflow = readFileSync(".github/workflows/release-windows.yml", "utf8");
 
-  assert.match(workflow, /default: "v0\.5\.1"/);
-  assert.match(workflow, /\$expectedVersion = "0\.5\.1"/);
+  assert.match(workflow, /default: "v0\.5\.2"/);
+  assert.match(workflow, /\$expectedVersion = "0\.5\.2"/);
   assert.doesNotMatch(workflow, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.doesNotMatch(workflow, /tauri-apps\/tauri-action/);
   assert.match(workflow, /Validate locally signed release assets and create checksums/);

@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Existing version tag to publish"
         required: true
-        default: "v0.5.1"
+        default: "v0.5.2"
         type: string
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
           DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = "Stop"
-          $expectedVersion = "0.5.1"
+          $expectedVersion = "0.5.2"
           $expectedTag = "v$expectedVersion"
           $expectedUpdaterEndpoint = "https://github.com/liang-0521/remote-terminal/releases/latest/download/latest.json"
 
