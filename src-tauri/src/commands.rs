@@ -388,6 +388,7 @@ pub async fn sftp_upload(
 pub async fn sftp_download_to_computer(
     session_id: String,
     remote_path: String,
+    transfer_id: String,
     app: AppHandle,
     state: State<'_, BackendState>,
 ) -> AppResult<Option<DownloadedFile>> {
@@ -410,7 +411,7 @@ pub async fn sftp_download_to_computer(
         )
     })?;
     state
-        .download_file_to_path(&session_id, &remote_path, target_path)
+        .download_file_to_path(&session_id, &remote_path, &transfer_id, target_path)
         .await
         .map(Some)
 }

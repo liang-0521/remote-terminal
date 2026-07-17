@@ -453,7 +453,8 @@
   font-size: 11px;
 }
 
-.remote-file-context-menu {
+.remote-file-context-menu,
+.terminal-context-menu {
   position: fixed;
   z-index: 150;
   display: grid;
@@ -468,7 +469,8 @@
   backdrop-filter: blur(8px);
 }
 
-.remote-file-context-menu__title {
+.remote-file-context-menu__title,
+.terminal-context-menu__title {
   padding: 7px 9px 8px;
   overflow: hidden;
   color: var(--text-muted);
@@ -477,7 +479,8 @@
   font-size: 10px;
 }
 
-.remote-file-context-menu > button {
+.remote-file-context-menu > button,
+.terminal-context-menu > button {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr);
   gap: 8px;
@@ -493,7 +496,9 @@
 }
 
 .remote-file-context-menu > button:hover,
-.remote-file-context-menu > button:focus-visible {
+.remote-file-context-menu > button:focus-visible,
+.terminal-context-menu > button:hover,
+.terminal-context-menu > button:focus-visible {
   outline: none;
   color: var(--text-strong);
   background: rgb(157 132 248 / 12%);
@@ -508,15 +513,34 @@
   background: rgb(255 105 97 / 10%);
 }
 
-.remote-file-context-menu > button:disabled {
+.remote-file-context-menu > button:disabled,
+.terminal-context-menu > button:disabled {
   opacity: 0.58;
   cursor: wait;
 }
 
-.remote-file-context-menu__separator {
+.remote-file-context-menu__separator,
+.terminal-context-menu__separator {
   height: 1px;
   margin: 5px 3px;
   background: var(--border-default);
+}
+
+.terminal-context-menu {
+  width: 220px;
+}
+
+.terminal-context-menu > button {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+}
+
+.terminal-context-menu > button:disabled {
+  cursor: default;
+}
+
+.terminal-context-menu kbd {
+  color: var(--text-muted);
+  font: 10px var(--font-mono);
 }
 
 .file-tree__message {

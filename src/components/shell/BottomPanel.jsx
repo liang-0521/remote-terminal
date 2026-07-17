@@ -125,6 +125,7 @@ function TransferView({ transfers, servers, onCancel, onRetry }) {
         const stateLabel = {
           queued: "排队中",
           uploading: "上传中",
+          downloading: "下载中",
           cancelling: "正在取消",
           finalizing: "正在完成",
           success: "已完成",
@@ -134,17 +135,19 @@ function TransferView({ transfers, servers, onCancel, onRetry }) {
         const transferServer = servers.find((item) => item.id === transfer.serverId);
         const destination = `${transferServer?.name || transfer.serverId} · ${transfer.target}`;
         const progress = Math.min(100, Math.max(0, Number(transfer.progress)));
+        const downloading = transfer.direction === "download";
+        const directionLabel = downloading ? "下载" : "上传";
         return <div key={transfer.id} className="transfer-row" role="row">
           <span role="cell" className="transfer-file">{transfer.state === "success" ? <CheckCircle size={18} weight="fill" aria-hidden="true" /> : <FileText size={18} aria-hidden="true" />} {transfer.fileName}</span>
-          <span role="cell">↑ 上传</span>
+          <span role="cell">{downloading ? "↓ 下载" : "↑ 上传"}</span>
           <span role="cell" className="transfer-target" title={destination}>{destination}</span>
           <span role="cell">{transfer.sizeLabel}</span>
-          <span role="cell" className="transfer-progress"><progress max="100" value={progress} aria-label={`${transfer.fileName} 上传进度`} aria-valuetext={`${Math.round(progress)}%，${stateLabel}`} /> <b>{Math.round(progress)}%</b></span>
-          <span role="cell">{transfer.state === "uploading" ? transfer.speed : "—"}</span>
+          <span role="cell" className="transfer-progress"><progress max="100" value={progress} aria-label={`${transfer.fileName} ${directionLabel}进度`} aria-valuetext={`${Math.round(progress)}%，${stateLabel}`} /> <b>{Math.round(progress)}%</b></span>
+          <span role="cell">{["uploading", "downloading"].includes(transfer.state) ? transfer.speed : "—"}</span>
           <span role="cell" title={transfer.error?.message}>{stateLabel}</span>
-          <span role="cell">{["queued", "uploading"].includes(transfer.state)
+          <span role="cell">{!downloading && ["queued", "uploading"].includes(transfer.state)
             ? <button type="button" className="text-button" aria-label={`取消 ${transfer.fileName}`} onClick={() => onCancel(transfer.id)}>取消</button>
-            : ["cancelled", "failed"].includes(transfer.state)
+            : !downloading && ["cancelled", "failed"].includes(transfer.state)
               ? <button type="button" className="text-button" aria-label={`重试 ${transfer.fileName}`} onClick={() => onRetry(transfer.id)}>重试</button>
               : "—"}</span>
         </div>;

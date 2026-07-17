@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "windows"))]
-compile_error!("Remote Terminal 0.5.0 is a Windows-only desktop client.");
+compile_error!("Remote Terminal 0.5.1 is a Windows-only desktop client.");
 
 mod backend;
 mod command_history;

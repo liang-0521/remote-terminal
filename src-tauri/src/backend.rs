@@ -610,11 +610,15 @@ impl BackendState {
         &self,
         session_id: &str,
         remote_path: &str,
+        transfer_id: &str,
         target_path: PathBuf,
     ) -> AppResult<DownloadedFile> {
         let _guard = self.operation_gate.read().await;
         self.ensure_operations_open()?;
-        let cached = self.ssh.download_to_cache(session_id, remote_path).await?;
+        let cached = self
+            .ssh
+            .download_to_cache(session_id, remote_path, transfer_id)
+            .await?;
         let copy_result = async {
             let canonical_path = self.ssh.cached_download_path(&cached.cache_id).await?;
             copy_cached_download(canonical_path, target_path, cached.size).await

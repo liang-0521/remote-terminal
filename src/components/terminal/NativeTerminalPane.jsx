@@ -25,7 +25,15 @@ import {
   searchInlineCommandCompletions,
   shouldAutoOpenCommandCompletion,
 } from "../../services/command-completion.js";
+import {
+  copyTerminalSelection,
+  isTerminalContextMenuKey,
+  pasteTerminalClipboard,
+  readTerminalSelection,
+  shouldFocusTerminal,
+} from "../../services/terminal-context-menu.js";
 import { IconButton } from "../shared/IconButton.jsx";
+import { TerminalContextMenu } from "./TerminalContextMenu.jsx";
 
 const INLINE_COMPLETION_LIMIT = 5;
 
@@ -226,20 +234,24 @@ function XtermSurface({
   const terminalWriteQueueRef = useRef(Promise.resolve());
   const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
+  const previousActiveRef = useRef(active);
   const sessionIdRef = useRef(sessionId);
   const connectionStateRef = useRef(connectionState);
+  const focusTerminalOnActivateRef = useRef(focusTerminalOnActivate);
   const reconnectRef = useRef(onReconnect);
   const onErrorRef = useRef(onError);
   const lastConnectionNoticeRef = useRef("");
   const commandSearchInputRef = useRef(null);
   const completionCatalogRef = useRef([]);
   const inlineCompletionOpenRef = useRef(false);
+  const terminalContextMenuOpenRef = useRef(false);
   const commandSearchOpenRef = useRef(false);
   const terminalInputRef = useRef(createTerminalInputState());
   const suggestionIndexRef = useRef(0);
   const suggestionsRef = useRef([]);
   const commandAssistanceModeRef = useRef(commandAssistanceMode);
   const [inlineCompletionOpen, setInlineCompletionOpen] = useState(false);
+  const [terminalContextMenu, setTerminalContextMenu] = useState(null);
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
   const [commandSearchQuery, setCommandSearchQuery] = useState("");
   const [commandSearchIndex, setCommandSearchIndex] = useState(0);
@@ -290,14 +302,35 @@ function XtermSurface({
   suggestionsRef.current = inlineSuggestions;
   suggestionIndexRef.current = selectedSuggestionIndex;
   commandAssistanceModeRef.current = commandAssistanceMode;
+  activeRef.current = active;
+  if (previousActiveRef.current !== active) {
+    previousActiveRef.current = active;
+    if (active) focusTerminalOnActivateRef.current = focusTerminalOnActivate;
+  }
   sessionIdRef.current = sessionId;
   connectionStateRef.current = connectionState;
   reconnectRef.current = onReconnect;
   onErrorRef.current = onError;
 
+  const focusTerminalIfAppropriate = useCallback(() => {
+    const activeElement = document.activeElement;
+    const terminalSlot = containerRef.current?.closest(".native-terminal-slot");
+    if (!shouldFocusTerminal({
+      active: activeRef.current,
+      contextMenuOpen: terminalContextMenuOpenRef.current,
+      commandSearchOpen: commandSearchOpenRef.current,
+      activeElement,
+      body: document.body,
+      terminalSlot,
+      terminalTabId: `terminal-tab-${connectionId}`,
+      focusTerminalOnActivate: focusTerminalOnActivateRef.current,
+    })) return;
+    terminalRef.current?.focus();
+  }, [connectionId]);
+
   const focusTerminalSoon = useCallback(() => {
-    window.requestAnimationFrame(() => terminalRef.current?.focus());
-  }, []);
+    window.requestAnimationFrame(focusTerminalIfAppropriate);
+  }, [focusTerminalIfAppropriate]);
 
   const updateInlineAnchor = useCallback(() => {
     const terminal = terminalRef.current;
@@ -323,6 +356,26 @@ function XtermSurface({
     setInlineAnchor(nextAnchor);
   }, []);
 
+  const getTerminalCursorContextAnchor = useCallback(() => {
+    const terminal = terminalRef.current;
+    const container = containerRef.current;
+    const screen = container?.querySelector(".xterm-screen");
+    const fallbackRect = container?.getBoundingClientRect();
+    if (!terminal || !screen || terminal.cols <= 0 || terminal.rows <= 0) {
+      return {
+        x: (fallbackRect?.left || 0) + 12,
+        y: (fallbackRect?.top || 0) + 12,
+      };
+    }
+    const screenRect = screen.getBoundingClientRect();
+    const cellWidth = screenRect.width / terminal.cols;
+    const lineHeight = screenRect.height / terminal.rows;
+    return {
+      x: screenRect.left + (terminal.buffer.active.cursorX * cellWidth) + (cellWidth / 2),
+      y: screenRect.top + ((terminal.buffer.active.cursorY + 1) * lineHeight),
+    };
+  }, []);
+
   const closeInlineCompletion = useCallback(() => {
     inlineCompletionOpenRef.current = false;
     suggestionIndexRef.current = 0;
@@ -336,6 +389,72 @@ function XtermSurface({
     setCommandSearchQuery("");
     setCommandSearchIndex(0);
     if (returnFocus) focusTerminalSoon();
+  }, [focusTerminalSoon]);
+
+  const closeTerminalContextMenu = useCallback((returnFocus = false) => {
+    terminalContextMenuOpenRef.current = false;
+    setTerminalContextMenu(null);
+    if (returnFocus) focusTerminalSoon();
+  }, [focusTerminalSoon]);
+
+  const openTerminalContextMenu = useCallback((anchor) => {
+    const terminal = terminalRef.current;
+    if (!terminal || !activeRef.current) return;
+    closeInlineCompletion();
+    closeCommandSearch({ returnFocus: false });
+    terminalContextMenuOpenRef.current = true;
+    setTerminalContextMenu({
+      connectionId,
+      x: anchor.x,
+      y: anchor.y,
+      selection: readTerminalSelection(terminal),
+    });
+  }, [closeCommandSearch, closeInlineCompletion, connectionId]);
+
+  const openTerminalContextMenuAtCursor = useCallback(() => {
+    openTerminalContextMenu(getTerminalCursorContextAnchor());
+  }, [getTerminalCursorContextAnchor, openTerminalContextMenu]);
+
+  const handleTerminalContextMenu = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const anchor = event.clientX || event.clientY
+      ? { x: event.clientX, y: event.clientY }
+      : getTerminalCursorContextAnchor();
+    openTerminalContextMenu(anchor);
+  }, [getTerminalCursorContextAnchor, openTerminalContextMenu]);
+
+  const blockRemoteTerminalRightClick = useCallback((event) => {
+    if (event.button !== 2) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, []);
+
+  const copySelectedTerminalText = useCallback((selection) => {
+    focusTerminalSoon();
+    void copyTerminalSelection(client.clipboard, selection)
+      .catch((error) => onErrorRef.current?.(error, connectionId));
+  }, [client, connectionId, focusTerminalSoon]);
+
+  const pasteIntoTerminal = useCallback(() => {
+    const terminal = terminalRef.current;
+    const targetSessionId = sessionIdRef.current;
+    if (!terminal || !targetSessionId) return;
+    focusTerminalSoon();
+    void pasteTerminalClipboard(
+      client.clipboard,
+      terminal,
+      () => activeRef.current
+        && terminalRef.current === terminal
+        && connectionStateRef.current === "connected"
+        && sessionIdRef.current === targetSessionId,
+    ).catch((error) => onErrorRef.current?.(error, connectionId));
+  }, [client, connectionId, focusTerminalSoon]);
+
+  const selectAllTerminalText = useCallback(() => {
+    if (!activeRef.current) return;
+    terminalRef.current?.selectAll();
+    focusTerminalSoon();
   }, [focusTerminalSoon]);
 
   const openCommandSearch = useCallback(() => {
@@ -374,12 +493,16 @@ function XtermSurface({
   }, [closeInlineCompletion, updateInlineAnchor]);
 
   const enqueueTerminalWrite = useCallback((data) => {
+    const queuedSessionId = sessionIdRef.current;
     const request = terminalWriteQueueRef.current.then(() => {
-      const currentSessionId = sessionIdRef.current;
-      if (!currentSessionId || connectionStateRef.current !== "connected") {
+      if (
+        !queuedSessionId
+        || sessionIdRef.current !== queuedSessionId
+        || connectionStateRef.current !== "connected"
+      ) {
         throw new Error("SSH 会话当前不可写。");
       }
-      return client.terminal.write(currentSessionId, data);
+      return client.terminal.write(queuedSessionId, data);
     });
     terminalWriteQueueRef.current = request.catch(() => undefined);
     return request;
@@ -464,6 +587,10 @@ function XtermSurface({
   }, [closeInlineCompletion, commandAssistanceMode]);
 
   useEffect(() => {
+    closeTerminalContextMenu(false);
+  }, [closeTerminalContextMenu, connectionState, sessionId]);
+
+  useEffect(() => {
     let cancelled = false;
     setLocalHistory([]);
     setHistoryLoading(true);
@@ -495,18 +622,18 @@ function XtermSurface({
   }, [commandSearchId, commandSearchOpen, selectedSearchIndex]);
 
   useEffect(() => {
-    activeRef.current = active;
     if (!active) {
       closeInlineCompletion();
       closeCommandSearch({ returnFocus: false });
+      closeTerminalContextMenu(false);
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
       fitRef.current?.fit();
-      if (focusTerminalOnActivate) terminalRef.current?.focus();
+      if (focusTerminalOnActivateRef.current) focusTerminalIfAppropriate();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active, closeCommandSearch, closeInlineCompletion, focusTerminalOnActivate]);
+  }, [active, closeCommandSearch, closeInlineCompletion, closeTerminalContextMenu, focusTerminalIfAppropriate]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -540,17 +667,15 @@ function XtermSurface({
     terminal.open(element);
     terminalRef.current = terminal;
     fitRef.current = fit;
-    let disposed = false;
-
-    const copySelection = () => {
-      const selection = terminal.getSelection();
-      if (!selection) return;
-      void client.clipboard.writeText(selection).catch((error) => onErrorRef.current?.(error, connectionId));
-    };
 
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || isImeCompositionKeyEvent(event)) return true;
       const ctrlShortcut = event.ctrlKey && !event.altKey && !event.metaKey;
+      if (isTerminalContextMenuKey(event)) {
+        event.preventDefault();
+        openTerminalContextMenuAtCursor();
+        return false;
+      }
       const togglesCompletion = ctrlShortcut && (
         (event.shiftKey && event.code === "KeyP")
         || (!event.shiftKey && event.code === "Space")
@@ -560,19 +685,15 @@ function XtermSurface({
         return false;
       }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyC") {
-        copySelection();
+        copySelectedTerminalText(readTerminalSelection(terminal));
         return false;
       }
       if (ctrlShortcut && !event.shiftKey && event.code === "KeyC" && terminal.hasSelection()) {
-        copySelection();
+        copySelectedTerminalText(readTerminalSelection(terminal));
         return false;
       }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyV") {
-        void client.clipboard.readText()
-          .then((text) => {
-            if (!disposed && text) terminal.paste(text);
-          })
-          .catch((error) => onErrorRef.current?.(error, connectionId));
+        pasteIntoTerminal();
         return false;
       }
 
@@ -640,7 +761,6 @@ function XtermSurface({
     resizeObserver.observe(element);
 
     return () => {
-      disposed = true;
       resizeObserver.disconnect();
       scrollSubscription.dispose();
       resizeSubscription.dispose();
@@ -649,7 +769,7 @@ function XtermSurface({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeInlineCompletion, connectionId, enqueueTerminalWrite, insertCompletion, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+  }, [client, closeInlineCompletion, connectionId, copySelectedTerminalText, enqueueTerminalWrite, insertCompletion, openTerminalContextMenuAtCursor, pasteIntoTerminal, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -673,7 +793,7 @@ function XtermSurface({
         attaching = false;
         if (activeRef.current) {
           fitRef.current?.fit();
-          terminal.focus();
+          focusTerminalIfAppropriate();
         }
       })
       .catch((error) => onErrorRef.current?.(error, connectionId));
@@ -681,7 +801,7 @@ function XtermSurface({
       disposed = true;
       unsubscribe();
     };
-  }, [client, connectionId, sessionId, updateInlineAnchor]);
+  }, [client, connectionId, focusTerminalIfAppropriate, sessionId, updateInlineAnchor]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -705,7 +825,22 @@ function XtermSurface({
 
   return (
     <>
-      <div ref={containerRef} className="native-xterm" role="region" aria-label="SSH 交互终端" />
+      <div
+        ref={containerRef}
+        className="native-xterm"
+        role="region"
+        aria-label="SSH 交互终端"
+        onMouseDownCapture={blockRemoteTerminalRightClick}
+        onContextMenuCapture={handleTerminalContextMenu}
+      />
+      <TerminalContextMenu
+        request={active ? terminalContextMenu : null}
+        pasteDisabled={connectionState !== "connected" || !sessionId}
+        onClose={closeTerminalContextMenu}
+        onCopy={copySelectedTerminalText}
+        onPaste={pasteIntoTerminal}
+        onSelectAll={selectAllTerminalText}
+      />
       <button
         type="button"
         className="native-completion-trigger"

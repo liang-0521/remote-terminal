@@ -21,6 +21,10 @@ import { RemoteDeleteDialog } from "./RemoteDeleteDialog.jsx";
 import { RemoteCreateDialog } from "./RemoteCreateDialog.jsx";
 import { RemoteFileContextMenu } from "./RemoteFileContextMenu.jsx";
 import { RemoteRenameDialog } from "./RemoteRenameDialog.jsx";
+import {
+  isRemoteFileRequestCurrent,
+  STALE_REMOTE_FILE_REQUEST_CODE,
+} from "../../services/workspace-session.js";
 
 export function ExplorerPanel({ mode, layout = "left", collapsed = false, embedded = false, server, servers, activeServerId, fileState, metrics, sampledAt, monitorLoading = false, monitorError = "", monitorIntervalSeconds = 1, onMonitorIntervalChange, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onDownloadRemoteFile, onRenameRemoteEntry, onDeleteRemoteEntry, onCreateRemoteEntry, onOpenTextFile, onRefresh, onNavigate, onListDirectory, onPlacementChange, onToggleCollapsed, onSelectServer, onOpenConnections }) {
   if (mode === "connections") {
@@ -62,13 +66,14 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
   const fileRowRefs = useRef([]);
   const downloadRequestRef = useRef(0);
   const [dragging, setDragging] = useState(false);
-  const [downloadState, setDownloadState] = useState({ key: "", phase: "idle", message: "" });
+  const [downloadState, setDownloadState] = useState({ key: "", phase: "idle", message: "", progress: null });
   const [contextMenu, setContextMenu] = useState(null);
   const [deleteRequest, setDeleteRequest] = useState(null);
   const [renameRequest, setRenameRequest] = useState(null);
   const [createRequest, setCreateRequest] = useState(null);
   const [focusedFileRow, setFocusedFileRow] = useState(0);
   const [pathDraft, setPathDraft] = useState(fileState?.path || "");
+  const available = Boolean(fileState?.available);
   uploadRef.current = onUpload;
 
   useEffect(() => () => {
@@ -92,7 +97,7 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
   }, [contextMenu]);
 
   useEffect(() => {
-    if (typeof onNativeDragDropSubscribe !== "function") return undefined;
+    if (!available || typeof onNativeDragDropSubscribe !== "function") return undefined;
     const unsubscribe = onNativeDragDropSubscribe((event) => {
       const shell = shellRef.current;
       if (!shell) return;
@@ -121,31 +126,52 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
       }
     });
     return unsubscribe;
-  }, [onNativeDragDropSubscribe]);
+  }, [available, onNativeDragDropSubscribe]);
+
+  useEffect(() => {
+    if (available) return;
+    setDragging(false);
+    setContextMenu(null);
+    setDeleteRequest(null);
+    setRenameRequest(null);
+    setCreateRequest(null);
+  }, [available]);
 
   const currentPath = fileState?.path;
-  const isRefreshing = Boolean(fileState?.loading);
+  const isRefreshing = available && Boolean(fileState?.loading);
   const parentPath = currentPath && currentPath !== "/"
     ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/"
     : null;
-  const liveStatus = isRefreshing
-    ? "正在刷新远程文件"
-    : fileState?.error
-      ? ""
-      : currentPath
-        ? `已显示远程路径 ${currentPath}`
-        : "SFTP 不可用";
+  const hasSnapshot = Boolean(currentPath);
+  const disconnectedMessage = fileState?.connectionState === "connecting"
+    ? hasSnapshot ? "正在重新连接，已保留上次目录内容。" : "正在连接服务器…"
+    : fileState?.connectionState === "connected"
+      ? hasSnapshot ? "SFTP 当前不可用，已保留上次目录内容。" : "SFTP 当前不可用。"
+      : hasSnapshot
+        ? "连接已断开，已保留上次目录内容；重连后将自动刷新。"
+        : "连接已断开，暂无可显示的远程目录。";
+  const liveStatus = !available
+    ? disconnectedMessage
+    : isRefreshing
+      ? "正在刷新远程文件"
+      : fileState?.error
+        ? ""
+        : currentPath
+          ? `已显示远程路径 ${currentPath}`
+          : "SFTP 不可用";
   const rows = [
     ...(parentPath ? [{
       key: "parent:..",
       entry: { name: "..", type: "directory", size: 0 },
-      onOpen: () => onNavigate?.(parentPath),
+      onOpen: available ? () => onNavigate?.(parentPath) : undefined,
     }] : []),
     ...(fileState?.entries || []).map((entry) => ({
       key: `${entry.type}:${entry.name}`,
       entry,
       remotePath: `${currentPath === "/" ? "" : currentPath}/${entry.name}`,
-      onOpen: entry.type === "directory"
+      onOpen: !available
+        ? undefined
+        : entry.type === "directory"
         ? () => onNavigate?.(`${currentPath === "/" ? "" : currentPath}/${entry.name}`)
         : entry.type === "file"
           ? () => onOpenTextFile?.({ entry, path: `${currentPath === "/" ? "" : currentPath}/${entry.name}` })
@@ -163,7 +189,7 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
 
   useEffect(() => {
     downloadRequestRef.current += 1;
-    setDownloadState({ key: "", phase: "idle", message: "" });
+    setDownloadState({ key: "", phase: "idle", message: "", progress: null });
     setContextMenu(null);
     setDeleteRequest(null);
     setRenameRequest(null);
@@ -174,18 +200,23 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
     if (entry.type !== "file" || downloadState.phase === "downloading") return;
     const requestId = downloadRequestRef.current + 1;
     downloadRequestRef.current = requestId;
-    setDownloadState({ key, phase: "downloading", message: `正在下载 ${entry.name}…` });
+    setDownloadState({ key, phase: "downloading", message: `正在下载 ${entry.name}…`, progress: 0 });
     try {
-      const result = await onDownloadRemoteFile?.(remotePath);
+      const result = await onDownloadRemoteFile?.(remotePath, (event) => {
+        if (downloadRequestRef.current !== requestId) return;
+        const progress = Math.min(100, Math.max(0, Math.round(Number(event?.progress) || 0)));
+        setDownloadState({ key, phase: "downloading", message: `正在下载 ${entry.name}…`, progress });
+      });
       if (downloadRequestRef.current !== requestId) return;
       setDownloadState({
         key,
         phase: result ? "done" : "cancelled",
         message: result ? `${entry.name} 已下载到所选位置。` : `已取消下载 ${entry.name}。`,
+        progress: result ? 100 : null,
       });
     } catch (error) {
       if (downloadRequestRef.current !== requestId) return;
-      setDownloadState({ key, phase: "error", message: error?.message || `无法下载 ${entry.name}。` });
+      setDownloadState({ key, phase: "error", message: error?.message || `无法下载 ${entry.name}。`, progress: null });
     }
   }
 
@@ -262,11 +293,12 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
       <div className="section-heading">
         <h3>远程文件</h3>
         <span>
-          <IconButton label="刷新远程文件" onClick={onRefresh} className={isRefreshing ? "is-spinning" : ""}>
+          <IconButton label="刷新远程文件" disabled={!available} onClick={onRefresh} className={isRefreshing ? "is-spinning" : ""}>
             <ArrowsClockwise size={19} />
           </IconButton>
           <IconButton
             label="选择文件上传"
+            disabled={!available}
             onClick={() => void onSelectUploadFiles?.()}
           >
             <CloudArrowUp size={19} />
@@ -282,14 +314,16 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
           if (nextPath) onNavigate?.(nextPath);
         }}
       >
-        <input value={pathDraft} disabled={!currentPath} aria-label="远程路径" onChange={(event) => setPathDraft(event.target.value)} />
-        <button type="submit" disabled={!pathDraft.trim() || pathDraft.trim() === currentPath}>转到</button>
+        <input value={pathDraft} disabled={!available || !currentPath} aria-label="远程路径" onChange={(event) => setPathDraft(event.target.value)} />
+        <button type="submit" disabled={!available || !pathDraft.trim() || pathDraft.trim() === currentPath}>转到</button>
       </form>
 
       <div className={`remote-file-manager is-${layout}`}>
         <RemoteDirectoryTree
           treeKey={treeKey}
           currentPath={currentPath}
+          sessionKey={fileState?.sessionKey}
+          available={available}
           onListDirectory={onListDirectory}
           onNavigate={onNavigate}
         />
@@ -297,6 +331,10 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
           ref={shellRef}
           className={`file-tree-shell ${dragging ? "is-dragging" : ""}`}
           onContextMenu={(event) => {
+            if (!available) {
+              event.preventDefault();
+              return;
+            }
             if (event.target.closest?.(".native-file-row")) return;
             openContextMenu(event, {
               key: "background:current-directory",
@@ -311,14 +349,16 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
             role={layout === "bottom" ? "table" : "tree"}
             aria-label="远程文件列表，可拖放上传"
             aria-busy={isRefreshing}
+            aria-disabled={!available}
           >
             {layout === "bottom" && (
               <div className="remote-file-table__header" role="row">
                 <span role="columnheader">文件名</span><span role="columnheader">大小</span><span role="columnheader">类型</span><span role="columnheader">修改时间</span><span role="columnheader">权限</span><span role="columnheader">用户/用户组</span>
               </div>
             )}
-            {fileState?.error && <div className="file-tree__message is-error" role="alert">{fileState.error}</div>}
-            {!fileState?.error && !fileState?.loading && fileState?.entries?.length === 0 && <div className="file-tree__message">此目录为空</div>}
+            {!available && <div className="file-tree__message" role="status">{disconnectedMessage}</div>}
+            {available && fileState?.error && <div className="file-tree__message is-error" role="alert">{fileState.error}</div>}
+            {available && !fileState?.error && !fileState?.loading && fileState?.entries?.length === 0 && <div className="file-tree__message">此目录为空</div>}
             {rows.map(({ key, entry, remotePath, onOpen }, index) => (
               <NativeFileRow
                 key={key}
@@ -329,13 +369,19 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
                 tabIndex={focusedFileRow === index ? 0 : -1}
                 onFocus={() => setFocusedFileRow(index)}
                 onMove={(event) => moveFileRowFocus(event, index)}
-                onContextMenu={(event) => openContextMenu(event, {
-                  key,
-                  entry,
-                  remotePath,
-                  onOpen,
-                  createDirectory: entry.type === "directory" && entry.name !== ".." ? remotePath : currentPath,
-                })}
+                onContextMenu={(event) => {
+                  if (!available) {
+                    event.preventDefault();
+                    return;
+                  }
+                  openContextMenu(event, {
+                    key,
+                    entry,
+                    remotePath,
+                    onOpen,
+                    createDirectory: entry.type === "directory" && entry.name !== ".." ? remotePath : currentPath,
+                  });
+                }}
               />
             ))}
           </div>
@@ -352,6 +398,7 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
         <div className={`file-tree__download-status is-${downloadState.phase}`} role="status">
           {downloadState.phase === "downloading" && <CircleNotch size={14} className="is-spinning" />}
           <span>{downloadState.message}</span>
+          {downloadState.progress !== null && <b>{downloadState.progress}%</b>}
         </div>
       )}
       <span className="file-tree__status" role="status" aria-live="polite" aria-atomic="true">{liveStatus}</span>
@@ -396,13 +443,15 @@ function joinRemotePath(parent, name) {
   return parent === "/" ? `/${name}` : `${parent}/${name}`;
 }
 
-function RemoteDirectoryTree({ treeKey, currentPath, onListDirectory, onNavigate }) {
+function RemoteDirectoryTree({ treeKey, sessionKey, available, currentPath, onListDirectory, onNavigate }) {
   const nodesRef = useRef({});
   const requestsRef = useRef(new Map());
   const treeKeyRef = useRef(treeKey);
+  const sessionKeyRef = useRef(sessionKey);
   const [nodes, setNodes] = useState({});
   const [expandedPaths, setExpandedPaths] = useState(() => new Set(["/"]));
   treeKeyRef.current = treeKey;
+  sessionKeyRef.current = sessionKey;
 
   useEffect(() => {
     nodesRef.current = {};
@@ -411,40 +460,66 @@ function RemoteDirectoryTree({ treeKey, currentPath, onListDirectory, onNavigate
     setExpandedPaths(new Set(["/"]));
   }, [treeKey]);
 
+  useEffect(() => {
+    if (available) return;
+    requestsRef.current.clear();
+    const retainedNodes = Object.fromEntries(Object.entries(nodesRef.current).map(([path, node]) => [
+      path,
+      { ...node, loading: false },
+    ]));
+    nodesRef.current = retainedNodes;
+    setNodes(retainedNodes);
+  }, [available]);
+
   const ensureNode = useCallback((path) => {
-    if (typeof onListDirectory !== "function") return Promise.resolve();
-    if (nodesRef.current[path]?.loaded) return Promise.resolve();
-    const requestKey = `${treeKeyRef.current || "none"}:${path}`;
+    if (!available || typeof onListDirectory !== "function") return Promise.resolve();
+    if (nodesRef.current[path]?.loaded && nodesRef.current[path]?.sessionKey === sessionKeyRef.current) return Promise.resolve();
+    const requestKey = `${treeKeyRef.current || "none"}:${sessionKeyRef.current || "offline"}:${path}`;
     const existingRequest = requestsRef.current.get(requestKey);
     if (existingRequest) return existingRequest;
-    const requestTreeKey = treeKeyRef.current;
+    const requestContext = { treeKey: treeKeyRef.current, sessionKey: sessionKeyRef.current };
     const loadingNode = { ...(nodesRef.current[path] || {}), loading: true, error: "" };
     nodesRef.current = { ...nodesRef.current, [path]: loadingNode };
     setNodes(nodesRef.current);
     const request = onListDirectory(path)
       .then((result) => {
-        if (treeKeyRef.current !== requestTreeKey) return;
+        if (!isRemoteFileRequestCurrent(requestContext, {
+          treeKey: treeKeyRef.current,
+          sessionKey: sessionKeyRef.current,
+        })) return;
         const nextNode = {
           loaded: true,
           loading: false,
           error: "",
+          sessionKey: requestContext.sessionKey,
           entries: (result?.entries || []).filter((entry) => entry.type === "directory" && ![".", ".."].includes(entry.name)),
         };
         nodesRef.current = { ...nodesRef.current, [path]: nextNode };
         setNodes(nodesRef.current);
       })
       .catch((error) => {
-        if (treeKeyRef.current !== requestTreeKey) return;
+        if (error?.code === STALE_REMOTE_FILE_REQUEST_CODE) return;
+        if (!isRemoteFileRequestCurrent(requestContext, {
+          treeKey: treeKeyRef.current,
+          sessionKey: sessionKeyRef.current,
+        })) return;
+        const previousNode = nodesRef.current[path] || {};
         nodesRef.current = {
           ...nodesRef.current,
-          [path]: { loaded: false, loading: false, entries: [], error: error?.message || "无法读取目录" },
+          [path]: {
+            ...previousNode,
+            loaded: false,
+            loading: false,
+            entries: previousNode.entries || [],
+            error: error?.message || "无法读取目录",
+          },
         };
         setNodes(nodesRef.current);
       })
       .finally(() => requestsRef.current.delete(requestKey));
     requestsRef.current.set(requestKey, request);
     return request;
-  }, [onListDirectory]);
+  }, [available, onListDirectory]);
 
   useEffect(() => {
     const ancestors = remotePathAncestors(currentPath);
@@ -457,7 +532,7 @@ function RemoteDirectoryTree({ treeKey, currentPath, onListDirectory, onNavigate
       }
     })();
     return () => { disposed = true; };
-  }, [currentPath, ensureNode, treeKey]);
+  }, [available, currentPath, ensureNode, sessionKey, treeKey]);
 
   function toggleNode(path) {
     const expanding = !expandedPaths.has(path);
@@ -485,12 +560,13 @@ function RemoteDirectoryTree({ treeKey, currentPath, onListDirectory, onNavigate
           style={{ "--tree-depth": depth }}
         >
           {hasKnownChildren ? (
-            <button type="button" className="remote-directory-tree__toggle" aria-label={`${expanded ? "收起" : "展开"}${name}`} onClick={() => toggleNode(path)}>
+            <button type="button" disabled={!available} className="remote-directory-tree__toggle" aria-label={`${expanded ? "收起" : "展开"}${name}`} onClick={() => toggleNode(path)}>
               {node?.loading ? <CircleNotch size={13} className="is-spinning" /> : expanded ? <CaretDown size={13} /> : <CaretRight size={13} />}
             </button>
           ) : <span className="remote-directory-tree__toggle" />}
           <button
             type="button"
+            disabled={!available}
             className="remote-directory-tree__name"
             title={path}
             onClick={() => {

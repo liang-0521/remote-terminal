@@ -320,6 +320,20 @@ pub struct CachedDownloadRelease {
     pub released: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgressEvent {
+    pub id: String,
+    pub session_id: String,
+    pub connection_id: String,
+    pub file_name: String,
+    pub target: String,
+    pub size: u64,
+    pub transferred: u64,
+    pub speed: f64,
+    pub progress: f64,
+}
+
 #[derive(Clone, Debug)]
 struct DownloadCachePaths {
     directory: PathBuf,
@@ -1253,7 +1267,9 @@ impl SshManager {
         &self,
         session_id: &str,
         remote_path: &str,
+        transfer_id: &str,
     ) -> AppResult<CachedDownload> {
+        let transfer_id = validate_id(transfer_id, "下载任务标识")?;
         let session = self.session(session_id).await?;
         let remote_path = normalize_remote_path(remote_path)?;
         let file_name = download_file_name(&remote_path)?;
@@ -1296,7 +1312,86 @@ impl SshManager {
 
         let (cache_id, cache_paths) =
             create_download_cache_paths(&self.inner.download_cache_directory, &file_name).await?;
-        cache_download_reader(&mut remote_file, expected_size, &cache_paths).await?;
+        let started_at = Instant::now();
+        let mut last_event = Instant::now();
+        if let Err(error) = self.emit(
+            "download-progress",
+            &DownloadProgressEvent {
+                id: transfer_id.clone(),
+                session_id: session.id.clone(),
+                connection_id: session.connection_id.clone(),
+                file_name: file_name.clone(),
+                target: remote_path.clone(),
+                size: expected_size,
+                transferred: 0,
+                speed: 0.0,
+                progress: 0.0,
+            },
+        ) {
+            report_background_error("发送 SFTP 下载初始状态", &error);
+        }
+        let progress_manager = self.clone();
+        let progress_transfer_id = transfer_id.clone();
+        let progress_session_id = session.id.clone();
+        let progress_connection_id = session.connection_id.clone();
+        let progress_file_name = file_name.clone();
+        let progress_target = remote_path.clone();
+        let mut report_progress = move |transferred: u64| {
+            if last_event.elapsed() < PROGRESS_INTERVAL || transferred >= expected_size {
+                return;
+            }
+            let elapsed = started_at.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                transferred as f64 / elapsed
+            } else {
+                0.0
+            };
+            if let Err(error) = progress_manager.emit(
+                "download-progress",
+                &DownloadProgressEvent {
+                    id: progress_transfer_id.clone(),
+                    session_id: progress_session_id.clone(),
+                    connection_id: progress_connection_id.clone(),
+                    file_name: progress_file_name.clone(),
+                    target: progress_target.clone(),
+                    size: expected_size,
+                    transferred,
+                    speed,
+                    progress: download_progress_percent(transferred, expected_size),
+                },
+            ) {
+                report_background_error("发送 SFTP 下载进度", &error);
+            }
+            last_event = Instant::now();
+        };
+        cache_download_reader(
+            &mut remote_file,
+            expected_size,
+            &cache_paths,
+            &mut report_progress,
+        )
+        .await?;
+        let elapsed = started_at.elapsed().as_secs_f64();
+        if let Err(error) = self.emit(
+            "download-progress",
+            &DownloadProgressEvent {
+                id: transfer_id,
+                session_id: session.id.clone(),
+                connection_id: session.connection_id.clone(),
+                file_name: file_name.clone(),
+                target: remote_path.clone(),
+                size: expected_size,
+                transferred: expected_size,
+                speed: if elapsed > 0.0 {
+                    expected_size as f64 / elapsed
+                } else {
+                    0.0
+                },
+                progress: 100.0,
+            },
+        ) {
+            report_background_error("发送 SFTP 下载完成进度", &error);
+        }
         let local_path = windows_path_text(&cache_paths.completed)?;
         let cached = CachedDownload {
             cache_id: cache_id.clone(),
@@ -2899,11 +2994,12 @@ async fn cache_download_reader<R>(
     reader: &mut R,
     expected_size: u64,
     paths: &DownloadCachePaths,
+    on_progress: &mut impl FnMut(u64),
 ) -> AppResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let result = write_download_cache(reader, expected_size, paths).await;
+    let result = write_download_cache(reader, expected_size, paths, on_progress).await;
     let Err(error) = result else {
         return Ok(());
     };
@@ -2920,6 +3016,7 @@ async fn write_download_cache<R>(
     reader: &mut R,
     expected_size: u64,
     paths: &DownloadCachePaths,
+    on_progress: &mut impl FnMut(u64),
 ) -> AppResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2952,6 +3049,7 @@ where
         local_file.write_all(&buffer[..read]).await.map_err(|_| {
             AppError::new("DOWNLOAD_CACHE_WRITE_FAILED", "写入本地下载临时文件失败。")
         })?;
+        on_progress(transferred);
     }
     if transferred != expected_size {
         return Err(AppError::new(
@@ -2978,6 +3076,14 @@ where
             )
         })?;
     validate_local_cached_file(&paths.completed, expected_size).await
+}
+
+fn download_progress_percent(transferred: u64, expected_size: u64) -> f64 {
+    if expected_size == 0 {
+        0.0
+    } else {
+        ((transferred as f64 / expected_size as f64) * 100.0).min(100.0)
+    }
 }
 
 async fn validate_local_cached_file(path: &Path, expected_size: u64) -> AppResult<()> {
@@ -3537,13 +3643,20 @@ mod tests {
             .await
             .unwrap();
         let mut reader = bytes.as_slice();
+        let mut progress = Vec::new();
 
-        cache_download_reader(&mut reader, bytes.len() as u64, &paths)
-            .await
-            .unwrap();
+        cache_download_reader(
+            &mut reader,
+            bytes.len() as u64,
+            &paths,
+            &mut |transferred| progress.push(transferred),
+        )
+        .await
+        .unwrap();
 
         assert!(!paths.partial.exists());
         assert_eq!(fs::read(&paths.completed).unwrap(), bytes);
+        assert_eq!(progress.last().copied(), Some(bytes.len() as u64));
         let cached = CachedDownload {
             cache_id,
             session_id: Uuid::new_v4().to_string(),
@@ -3590,7 +3703,7 @@ mod tests {
             .unwrap();
         let mut reader = b"too many bytes".as_slice();
 
-        let error = cache_download_reader(&mut reader, 3, &paths)
+        let error = cache_download_reader(&mut reader, 3, &paths, &mut |_| {})
             .await
             .unwrap_err();
 

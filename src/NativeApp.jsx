@@ -16,7 +16,17 @@ import { TopBar } from "./components/shell/TopBar.jsx";
 import { DEFAULT_EXPLORER_WIDTH, WorkspaceResizeHandle } from "./components/shell/WorkspaceResizeHandle.jsx";
 import { getNativeClient } from "./native/client.js";
 import { resolveInterfaceColorScheme } from "./services/interface-theme.js";
-import { shouldRefreshRemoteDirectory } from "./services/transfer-state.js";
+import {
+  mergeDownloadProgressTransfer,
+  shouldRefreshRemoteDirectory,
+} from "./services/transfer-state.js";
+import {
+  applyConnectedWorkspace,
+  applyWorkspaceSessionEvent,
+  canUseRemoteFiles,
+  isRemoteFileSessionCurrent,
+  STALE_REMOTE_FILE_REQUEST_CODE,
+} from "./services/workspace-session.js";
 import "./native-styles.css";
 import "./update-styles.css";
 import "./credential-styles.css";
@@ -27,7 +37,7 @@ const NativeTerminalPane = lazy(() => import("./components/terminal/NativeTermin
   .then(({ NativeTerminalPane: component }) => ({ default: component })));
 
 const DEFAULT_BOTTOM_PANEL_HEIGHT = 344;
-const ACTIVE_TRANSFER_STATES = new Set(["queued", "uploading", "cancelling", "finalizing"]);
+const ACTIVE_TRANSFER_STATES = new Set(["queued", "uploading", "downloading", "cancelling", "finalizing"]);
 const DEFAULT_APPEARANCE = {
   accent: "#9d84f8",
   terminalBackground: "#061423",
@@ -157,6 +167,7 @@ export function NativeApp() {
   const attemptsRef = useRef(new Map());
   const directoryRequestsRef = useRef(new Map());
   const completionRequestsRef = useRef(new Map());
+  const downloadProgressCallbacksRef = useRef(new Map());
   const monitorInFlightRef = useRef(new Set());
   const uiPreferencesLoadedRef = useRef(false);
   const uiPreferencesSaveQueueRef = useRef(Promise.resolve());
@@ -307,11 +318,17 @@ export function NativeApp() {
     }
   }, [addIssue, client, updateWorkspace]);
 
-  const listRemoteDirectory = useCallback((remotePath) => {
+  const listRemoteDirectory = useCallback(async (remotePath) => {
     const connectionId = activeConnectionIdRef.current;
     const sessionId = connectionId ? workspacesRef.current[connectionId]?.sessionId : null;
     if (!sessionId) return Promise.reject(new Error("当前工作区没有可用的 SFTP 会话。"));
-    return client.sftp.list(sessionId, remotePath);
+    const result = await client.sftp.list(sessionId, remotePath);
+    if (!isRemoteFileSessionCurrent(workspacesRef.current[connectionId], sessionId)) {
+      const error = new Error("远程目录请求所属会话已失效。");
+      error.code = STALE_REMOTE_FILE_REQUEST_CODE;
+      throw error;
+    }
+    return result;
   }, [client]);
 
   const loadCompletionCatalog = useCallback(async (connectionId, sessionIdOverride) => {
@@ -490,14 +507,8 @@ export function NativeApp() {
       if (!connectionId || !event.sessionId) return;
       const currentWorkspace = workspacesRef.current[connectionId];
       if (currentWorkspace?.sessionId !== event.sessionId) return;
-      updateWorkspace(connectionId, (workspace) => {
-        return {
-          ...workspace,
-          state: event.state,
-          error: event.error?.message || (event.state === "error" ? "SSH 会话发生错误。" : ""),
-          ...(event.state === "disconnected" ? { sessionId: null } : {}),
-        };
-      });
+      if (event.state === "disconnected") directoryRequestsRef.current.delete(connectionId);
+      updateWorkspace(connectionId, (workspace) => applyWorkspaceSessionEvent(workspace, event));
       if (event.error?.message) addIssue(connectionId, "SSH 会话错误", event.error.message, event.error.code);
       if (event.state === "disconnected") {
         setOpenDocuments((current) => {
@@ -533,9 +544,33 @@ export function NativeApp() {
         }
       }
     });
+    const unsubscribeDownload = client.events.onDownloadProgress((event) => {
+      if (!event?.id || !event.connectionId || !event.sessionId) return;
+      const currentWorkspace = workspacesRef.current[event.connectionId];
+      if (currentWorkspace?.sessionId !== event.sessionId) return;
+      const previousTransfer = currentWorkspace.transfers.find((item) => item.id === event.id);
+      const transfer = mergeDownloadProgressTransfer(previousTransfer, toUiTransfer({
+        ...event,
+        direction: "download",
+        state: "downloading",
+        error: null,
+      }));
+      if (transfer === previousTransfer) return;
+      updateWorkspace(event.connectionId, (workspace) => {
+        const exists = workspace.transfers.some((item) => item.id === transfer.id);
+        return {
+          ...workspace,
+          transfers: exists
+            ? workspace.transfers.map((item) => item.id === transfer.id ? transfer : item)
+            : [transfer, ...workspace.transfers],
+        };
+      });
+      downloadProgressCallbacksRef.current.get(event.id)?.(event);
+    });
     return () => {
       unsubscribeState();
       unsubscribeTransfer();
+      unsubscribeDownload();
     };
   }, [addIssue, client, loadDirectory, updateWorkspace]);
 
@@ -671,17 +706,14 @@ export function NativeApp() {
           ? { ...item, hasSavedPassword: true }
           : item));
       }
-      updateWorkspace(connectionId, {
-        sessionId: result.sessionId,
-        terminalSessionId: result.sessionId,
-        state: "connected",
-        error: "",
-        directory: result.home,
-        sftpError: result.sftpError?.message || "",
-        filesError: result.sftpError?.message || "",
+      let refreshDirectory = result.home;
+      updateWorkspace(connectionId, (workspace) => {
+        const connectedWorkspace = applyConnectedWorkspace(workspace, result);
+        refreshDirectory = connectedWorkspace.directory;
+        return connectedWorkspace;
       });
       void loadCompletionCatalog(connectionId, result.sessionId);
-      if (result.home) void loadDirectory(connectionId, result.home, result.sessionId);
+      if (refreshDirectory) void loadDirectory(connectionId, refreshDirectory, result.sessionId);
       if (result.sftpError?.message) addIssue(connectionId, "SFTP 不可用", result.sftpError.message, result.sftpError.code);
       if (result.credentialPersistence?.state === "failed") {
         addIssue(
@@ -959,14 +991,53 @@ export function NativeApp() {
     }
   }
 
-  async function downloadRemoteFile(remotePath) {
+  async function downloadRemoteFile(remotePath, onProgress) {
     const connectionId = activeConnectionIdRef.current;
     const workspace = connectionId ? workspacesRef.current[connectionId] : null;
     if (!connectionId || !workspace?.sessionId) {
       throw new Error("当前工作区没有可用的 SFTP 会话。");
     }
+    const sessionId = workspace.sessionId;
+    const transferId = crypto.randomUUID();
+    const fileName = remotePath.split("/").at(-1) || remotePath;
+    const initialTransfer = toUiTransfer({
+      id: transferId,
+      sessionId,
+      connectionId,
+      direction: "download",
+      fileName,
+      target: remotePath,
+      size: 0,
+      transferred: 0,
+      speed: 0,
+      progress: 0,
+      state: "queued",
+      error: null,
+    });
+    updateWorkspace(connectionId, (current) => ({
+      ...current,
+      transfers: [initialTransfer, ...current.transfers],
+    }));
+    if (typeof onProgress === "function") {
+      downloadProgressCallbacksRef.current.set(transferId, onProgress);
+    }
+    if (activeConnectionIdRef.current === connectionId) openTransferPanel();
     try {
-      const result = await client.sftp.downloadToComputer(workspace.sessionId, remotePath);
+      const result = await client.sftp.downloadToComputer(sessionId, remotePath, transferId);
+      updateWorkspace(connectionId, (current) => ({
+        ...current,
+        transfers: current.transfers.map((transfer) => transfer.id === transferId
+          ? {
+            ...transfer,
+            size: result?.size ?? transfer.size,
+            sizeLabel: result ? formatBytes(result.size) : transfer.sizeLabel,
+            transferred: result?.size ?? transfer.transferred,
+            progress: result ? 100 : transfer.progress,
+            speed: "—",
+            state: result ? "success" : "cancelled",
+          }
+          : transfer),
+      }));
       if (result?.cleanupError) {
         addIssue(
           connectionId,
@@ -977,6 +1048,12 @@ export function NativeApp() {
       }
       return result;
     } catch (error) {
+      updateWorkspace(connectionId, (current) => ({
+        ...current,
+        transfers: current.transfers.map((transfer) => transfer.id === transferId
+          ? { ...transfer, speed: "—", state: "failed", error }
+          : transfer),
+      }));
       addIssue(
         connectionId,
         "下载远程文件失败",
@@ -984,6 +1061,8 @@ export function NativeApp() {
         error?.code || "SFTP_DOWNLOAD_FAILED",
       );
       throw error;
+    } finally {
+      downloadProgressCallbacksRef.current.delete(transferId);
     }
   }
 
@@ -1178,6 +1257,9 @@ export function NativeApp() {
       entries: activeWorkspace.entries,
       loading: activeWorkspace.filesLoading,
       error: activeWorkspace.filesError,
+      available: canUseRemoteFiles(activeWorkspace),
+      connectionState: activeWorkspace.state,
+      sessionKey: activeWorkspace.sessionId,
     } : null,
     metrics: activeWorkspace?.metrics || null,
     sampledAt: activeWorkspace?.sampledAt || "尚未采样",

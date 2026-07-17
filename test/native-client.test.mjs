@@ -342,19 +342,25 @@ test("Tauri 上传只接受原生来源的 Windows 绝对路径", async () => {
   );
 });
 
-test("Tauri 远程文件下载位置只由 Rust 原生保存窗口决定", async () => {
+test("Tauri 远程文件下载由独立任务标识关联原生进度", async () => {
   const api = createTauriApi();
   const client = createNativeClient(api);
+  const events = [];
+  const dispose = client.events.onDownloadProgress((event) => events.push(event));
+  await dispose.ready;
 
-  await client.sftp.downloadToComputer("session-1", "/var/log/app.log");
+  await client.sftp.downloadToComputer("session-1", "/var/log/app.log", "download-1");
+  api.handlers.get("download-progress")({ payload: { id: "download-1", progress: 42 } });
 
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
     {
       type: "invoke",
       command: "sftp_download_to_computer",
-      args: { sessionId: "session-1", remotePath: "/var/log/app.log" },
+      args: { sessionId: "session-1", remotePath: "/var/log/app.log", transferId: "download-1" },
     },
   ]);
+  assert.deepEqual(events, [{ id: "download-1", progress: 42 }]);
+  dispose();
 });
 
 test("远程文件菜单只保留下载到入口，不再暴露拖出交互", async () => {

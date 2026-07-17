@@ -52,6 +52,7 @@ const TAURI_EVENTS = Object.freeze({
   terminalData: "terminal-data",
   sessionState: "session-state",
   transferProgress: "transfer-progress",
+  downloadProgress: "download-progress",
   closeRequested: "app://close-requested",
 });
 
@@ -517,8 +518,8 @@ function createTauriClient(api) {
         const preparedFiles = prepareTauriFiles(files);
         return call(TAURI_COMMANDS.sftpUpload, { sessionId, remoteDirectory, files: preparedFiles });
       },
-      downloadToComputer: (sessionId, remotePath) => (
-        call(TAURI_COMMANDS.sftpDownloadToComputer, { sessionId, remotePath })
+      downloadToComputer: (sessionId, remotePath, transferId) => (
+        call(TAURI_COMMANDS.sftpDownloadToComputer, { sessionId, remotePath, transferId })
       ),
       cancel: (transferId) => call(TAURI_COMMANDS.sftpCancel, { transferId }),
       retry: (transferId) => call(TAURI_COMMANDS.sftpRetry, { transferId }),
@@ -548,6 +549,7 @@ function createTauriClient(api) {
       ),
       onSessionState: (callback) => subscribeTauri(api, TAURI_EVENTS.sessionState, callback),
       onTransferProgress: (callback) => subscribeTauri(api, TAURI_EVENTS.transferProgress, callback),
+      onDownloadProgress: (callback) => subscribeTauri(api, TAURI_EVENTS.downloadProgress, callback),
       onUpdateStatus: (callback) => updates.subscribe(callback),
       onCloseRequested: (callback) => subscribeTauri(api, TAURI_EVENTS.closeRequested, callback),
       onDragDrop: (callback) => subscribeTauriDragDrop(api, callback),

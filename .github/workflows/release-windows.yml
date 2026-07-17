@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Existing version tag to publish"
         required: true
-        default: "v0.5.0"
+        default: "v0.5.1"
         type: string
 
 permissions:
@@ -17,6 +17,9 @@ jobs:
     runs-on: windows-latest
     environment:
       name: release
+    env:
+      # Cargo commands in tests, protocol smoke and signature verification must share one target tree.
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     defaults:
       run:
         shell: pwsh
@@ -50,7 +53,7 @@ jobs:
           DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = "Stop"
-          $expectedVersion = "0.5.0"
+          $expectedVersion = "0.5.1"
           $expectedTag = "v$expectedVersion"
           $expectedUpdaterEndpoint = "https://github.com/liang-0521/remote-terminal/releases/latest/download/latest.json"
 
@@ -142,7 +145,7 @@ jobs:
           "RELEASE_NOTES_PATH=$notesPath" >> $env:GITHUB_ENV
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Run Node tests
         run: npm test
@@ -151,10 +154,10 @@ jobs:
         run: npm run build
 
       - name: Run Rust tests
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+        run: npm run test:rust
 
       - name: Run native SSH and SFTP protocol smoke
-        run: node scripts/qa-rust-ssh.mjs
+        run: npm run test:ssh
 
       - name: Validate locally signed release assets and create checksums
         env:

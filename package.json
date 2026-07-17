@@ -1,6 +1,6 @@
 {
   "name": "remote-terminal",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Windows client for SSH terminals, SFTP transfers, and Linux performance monitoring.",
   "author": "Liang",
   "private": true,
@@ -12,6 +12,8 @@
     "build": "vite build",
     "package:win": "tauri build --bundles nsis",
     "test": "node --test --test-isolation=none",
+    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml",
+    "test:ssh": "node scripts/qa-rust-ssh.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
