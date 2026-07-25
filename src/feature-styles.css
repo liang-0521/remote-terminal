@@ -2,6 +2,54 @@
   grid-template-columns: var(--explorer-w) minmax(0, 1fr);
 }
 
+.workbench[data-side-panel-open="true"] {
+  grid-template-columns: var(--explorer-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto var(--status-bar-h);
+}
+
+.workbench[data-side-panel-open="false"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto var(--status-bar-h);
+}
+
+.workbench[data-side-panel-open="true"] > .explorer-panel {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.workbench[data-side-panel-open="true"] > .explorer-resize-handle {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.workbench[data-side-panel-open="true"] > .terminal-pane {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.workbench[data-side-panel-open="true"] > .bottom-panel {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.workbench[data-side-panel-open="false"] > .terminal-pane,
+.workbench[data-side-panel-open="false"] > .bottom-panel {
+  grid-column: 1;
+}
+
+.workbench[data-side-panel-open="false"] > .terminal-pane {
+  grid-row: 1;
+}
+
+.workbench[data-side-panel-open="false"] > .bottom-panel {
+  grid-row: 2;
+}
+
+.workbench[data-side-panel-open] > .status-bar {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+
 .workbench[data-explorer-placement="right"] {
   grid-template-columns: minmax(0, 1fr) var(--explorer-w);
 }
@@ -462,21 +510,103 @@ button.remote-directory-tree__toggle,
   min-width: 150px;
 }
 
-.native-terminal-stack.is-hidden {
-  display: none;
-}
-
-.native-document-stack {
+.native-workspace-grid {
   position: relative;
-  display: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: var(--terminal-background, var(--bg-terminal));
 }
 
-.native-document-stack.is-active {
+.native-workspace-grid.is-split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: 32px minmax(0, 1fr);
+}
+
+.native-workspace-grid > .native-terminal-slot,
+.native-workspace-grid > .remote-text-editor {
+  position: relative;
+  inset: auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.native-workspace-grid > .native-terminal-slot.is-primary,
+.native-workspace-grid > .remote-text-editor.is-primary {
   display: block;
+  grid-column: 1;
+  grid-row: 1 / -1;
+}
+
+.native-workspace-grid > .native-terminal-slot.is-secondary,
+.native-workspace-grid > .remote-text-editor.is-secondary {
+  display: block;
+  grid-column: 2;
+  grid-row: 2;
+  border-left: 1px solid var(--border-strong);
+}
+
+.native-workspace-split__header {
+  z-index: 3;
+  display: grid;
+  grid-column: 2;
+  grid-row: 1;
+  grid-template-columns: 20px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 10px;
+  border-bottom: 1px solid var(--border-default);
+  border-left: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  background: var(--surface-tabs);
+  font-size: 12px;
+}
+
+.native-workspace-split__header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-workspace-split__header button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.native-workspace-split__header button:hover,
+.native-workspace-split__header button:focus-visible {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.native-workspace-split__drop-zone {
+  position: absolute;
+  top: 10%;
+  right: 18px;
+  bottom: 10%;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  width: calc(50% - 24px);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  color: var(--accent-emphasis);
+  background: color-mix(in srgb, var(--accent), var(--bg-panel) 88%);
+  pointer-events: none;
+  font-size: 12px;
 }
 
 .bottom-panel__views,
@@ -522,10 +652,6 @@ button.remote-directory-tree__toggle,
   min-width: 24px;
   height: 24px;
   padding: 0;
-}
-
-.bottom-panel__content.is-files {
-  overflow: hidden;
 }
 
 .explorer-panel.is-embedded {

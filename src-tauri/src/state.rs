@@ -19,6 +19,8 @@ const INSTALL_DATA_MIGRATION_VERSION: u32 = 1;
 const DEFAULT_EXPLORER_WIDTH: f64 = 320.0;
 const DEFAULT_BOTTOM_PANEL_HEIGHT: f64 = 344.0;
 const DEFAULT_MONITOR_INTERVAL_SECONDS: u64 = 1;
+const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
+const DEFAULT_UI_SCALE: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +63,8 @@ pub struct AppearancePreferences {
     pub accent: String,
     pub terminal_background: String,
     pub terminal_foreground: String,
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u16,
     pub wallpaper_opacity: f64,
 }
 
@@ -70,6 +74,7 @@ impl Default for AppearancePreferences {
             accent: "#9d84f8".to_string(),
             terminal_background: "#061423".to_string(),
             terminal_foreground: "#c8cbd1".to_string(),
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             wallpaper_opacity: 0.22,
         }
     }
@@ -82,6 +87,8 @@ pub struct UiPreferences {
     pub interface_theme_mode: InterfaceThemeMode,
     #[serde(default)]
     pub appearance: AppearancePreferences,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f64,
     #[serde(default = "default_explorer_width")]
     pub explorer_width: f64,
     #[serde(default)]
@@ -107,6 +114,7 @@ impl Default for UiPreferences {
         Self {
             interface_theme_mode: InterfaceThemeMode::System,
             appearance: AppearancePreferences::default(),
+            ui_scale: DEFAULT_UI_SCALE,
             explorer_width: DEFAULT_EXPLORER_WIDTH,
             explorer_placement: ExplorerPlacement::Left,
             explorer_collapsed: false,
@@ -494,6 +502,14 @@ fn default_monitor_interval_seconds() -> u64 {
     DEFAULT_MONITOR_INTERVAL_SECONDS
 }
 
+fn default_terminal_font_size() -> u16 {
+    DEFAULT_TERMINAL_FONT_SIZE
+}
+
+fn default_ui_scale() -> f64 {
+    DEFAULT_UI_SCALE
+}
+
 fn validate_ui_preferences(preferences: &UiPreferences) -> Result<(), String> {
     for (label, color) in [
         ("accent", &preferences.appearance.accent),
@@ -514,6 +530,12 @@ fn validate_ui_preferences(preferences: &UiPreferences) -> Result<(), String> {
         || !(0.0..=1.0).contains(&preferences.appearance.wallpaper_opacity)
     {
         return Err("wallpaper opacity is invalid".to_string());
+    }
+    if !(11..=22).contains(&preferences.appearance.terminal_font_size) {
+        return Err("terminal font size is invalid".to_string());
+    }
+    if !preferences.ui_scale.is_finite() || !(0.8..=1.5).contains(&preferences.ui_scale) {
+        return Err("UI scale is invalid".to_string());
     }
     if !preferences.explorer_width.is_finite()
         || !(220.0..=520.0).contains(&preferences.explorer_width)
@@ -680,6 +702,8 @@ mod tests {
         preferences.interface_theme_mode = InterfaceThemeMode::Dark;
         preferences.appearance.accent = "#60a5fa".to_string();
         preferences.appearance.terminal_background = "#000000".to_string();
+        preferences.appearance.terminal_font_size = 17;
+        preferences.ui_scale = 1.25;
         preferences.explorer_width = 408.0;
         preferences.explorer_placement = ExplorerPlacement::Right;
         preferences.explorer_collapsed = true;

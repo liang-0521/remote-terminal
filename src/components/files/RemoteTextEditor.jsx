@@ -31,7 +31,7 @@ function mergeLiveContent(current, chunk) {
   return next.length > EDITOR_MEMORY_LIMIT ? next.slice(-EDITOR_MEMORY_LIMIT) : next;
 }
 
-export function RemoteTextEditor({ active = false, client, document, appearance, onDirtyChange, onSaved, onError }) {
+export function RemoteTextEditor({ active = false, connected = true, workspaceSlot = null, client, document, appearance, onDirtyChange, onSaved, onError }) {
   const textareaRef = useRef(null);
   const searchRef = useRef(null);
   const inFlightRef = useRef(false);
@@ -69,6 +69,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
 
   useEffect(() => {
     let cancelled = false;
+    const initialSessionId = document.sessionId;
     setLoading(true);
     setError("");
     setContent("");
@@ -79,7 +80,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
     const nextLive = isLogFile(document.path);
     setLive(nextLive);
     setEditing(false);
-    void client.sftp.readText(document.sessionId, document.path, null)
+    void client.sftp.readText(initialSessionId, document.path, null)
       .then((chunk) => {
         if (cancelled) return;
         const nextRevision = {
@@ -105,10 +106,10 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [client, document.path, document.sessionId]);
+  }, [client, document.key, document.path]);
 
   useEffect(() => {
-    if (!active || !live || loading || !revisionRef.current) return undefined;
+    if (!active || !connected || !live || loading || !revisionRef.current) return undefined;
     let disposed = false;
     const refresh = async () => {
       if (disposed || inFlightRef.current) return;
@@ -147,7 +148,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [active, client, document.path, document.sessionId, live, loading]);
+  }, [active, client, connected, document.path, document.sessionId, live, loading]);
 
   useEffect(() => {
     onDirtyChangeRef.current?.(document.key, dirty);
@@ -179,7 +180,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
   }
 
   async function refreshNow() {
-    if (loading || saving) return;
+    if (!connected || loading || saving) return;
     setLoading(true);
     setError("");
     try {
@@ -207,7 +208,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
   }
 
   async function save() {
-    if (!editing || !revision?.editable || !dirty || saving) return;
+    if (!connected || !editing || !revision?.editable || !dirty || saving) return;
     setSaving(true);
     setError("");
     try {
@@ -233,7 +234,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
 
   return (
     <section
-      className="remote-text-editor"
+      className={`remote-text-editor ${workspaceSlot ? `is-${workspaceSlot}` : ""}`.trim()}
       id={`document-panel-${document.key}`}
       hidden={!active}
       aria-label={`远程文本编辑器：${document.name}`}
@@ -297,8 +298,8 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
             <PencilSimple size={16} /> 编辑
           </button>
         )}
-        <IconButton label="刷新文件" disabled={loading || dirty} onClick={() => void refreshNow()}><ArrowsClockwise size={18} /></IconButton>
-        <button type="button" className="remote-text-editor__save" disabled={!editing || !dirty || saving} onClick={() => void save()}>
+        <IconButton label="刷新文件" disabled={!connected || loading || dirty} onClick={() => void refreshNow()}><ArrowsClockwise size={18} /></IconButton>
+        <button type="button" className="remote-text-editor__save" disabled={!connected || !editing || !dirty || saving} onClick={() => void save()}>
           <FloppyDisk size={16} /> {saving ? "保存中…" : "保存"}
         </button>
       </div>
@@ -320,7 +321,7 @@ export function RemoteTextEditor({ active = false, client, document, appearance,
         />
       </div>
       <footer className="remote-text-editor__status">
-        <span>{loading ? "正在读取…" : editing ? "编辑模式" : live ? "实时只读" : "只读预览"}</span>
+        <span>{!connected ? "连接已断开 · 内容已保留" : loading ? "正在读取…" : editing ? "编辑模式" : live ? "实时只读" : "只读预览"}</span>
         <span>{revision?.truncated ? "仅显示文件尾部 · " : ""}{revision?.encodingLossy ? "部分字符无法按 UTF-8 解码 · " : ""}{formatBytes(revision?.size)}</span>
       </footer>
     </section>

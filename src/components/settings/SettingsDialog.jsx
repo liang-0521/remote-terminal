@@ -53,6 +53,8 @@ const TERMINAL_FOREGROUND_PRESETS = [
   { name: "琥珀黄", value: "#facc15" },
 ];
 
+const UI_SCALE_OPTIONS = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
+
 const SETTINGS_PAGES = [
   { id: "appearance", label: "外观", description: "界面与终端", Icon: Palette },
   { id: "storage", label: "数据与存储", description: "目录与凭据", Icon: Database },
@@ -66,6 +68,8 @@ function normalizeComparablePath(value) {
 export function SettingsDialog({
   open,
   theme,
+  uiScale = 1,
+  onUiScaleChange,
   onThemeChange,
   onWallpaperChange,
   onRemoveWallpaper,
@@ -303,6 +307,46 @@ export function SettingsDialog({
             <strong>自动保存到本机</strong>
             <span>界面主题、颜色和工作台布局会在下次启动时恢复；终端背景图片仍只保留当前会话。</span>
           </div>
+
+          <section className="settings-form__section" aria-labelledby="settings-display-title">
+            <div className="settings-form__section-heading">
+              <div>
+                <h3 id="settings-display-title">显示比例与字号</h3>
+                <p>修改后立即应用，适合高分屏或并排查看多个终端。</p>
+              </div>
+            </div>
+            <div className="settings-form__display-grid">
+              <label htmlFor="settings-ui-scale">
+                <span>界面缩放</span>
+                <select
+                  id="settings-ui-scale"
+                  value={uiScale}
+                  onChange={(event) => onUiScaleChange?.(Number(event.target.value))}
+                >
+                  {UI_SCALE_OPTIONS.map((scale) => (
+                    <option key={scale} value={scale}>{Math.round(scale * 100)}%</option>
+                  ))}
+                </select>
+                <small>同时缩放导航、面板、设置和文字。</small>
+              </label>
+              <label className="settings-form__range settings-form__font-size" htmlFor="settings-terminal-font-size">
+                <span>
+                  终端字号
+                  <output htmlFor="settings-terminal-font-size">{theme.terminalFontSize || 14} px</output>
+                </span>
+                <input
+                  id="settings-terminal-font-size"
+                  type="range"
+                  min="11"
+                  max="22"
+                  step="1"
+                  value={theme.terminalFontSize || 14}
+                  onChange={(event) => updateTheme({ terminalFontSize: Number(event.target.value) })}
+                />
+                <small>只影响 SSH 终端，不改变界面字号。</small>
+              </label>
+            </div>
+          </section>
 
           <section className="settings-form__section" aria-labelledby="settings-color-title">
             <div className="settings-form__section-heading">

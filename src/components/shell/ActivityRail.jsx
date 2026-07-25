@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChartLine,
   Desktop,
-  Files,
   Gear,
   HardDrives,
   Moon,
@@ -12,7 +11,6 @@ import { IconButton } from "../shared/IconButton.jsx";
 
 const ITEMS = [
   { id: "connections", label: "服务器连接", Icon: HardDrives },
-  { id: "files", label: "资源管理器", Icon: Files },
   { id: "monitor", label: "性能监控", Icon: ChartLine },
 ];
 

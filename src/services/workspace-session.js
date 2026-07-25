@@ -46,4 +46,12 @@ export function isRemoteFileRequestCurrent(requestContext, currentContext) {
   return requestContext.treeKey === currentContext.treeKey
     && requestContext.sessionKey === currentContext.sessionKey;
 }
+
+export function rebindRemoteDocumentsToSession(documents, connectionId, sessionId) {
+  if (!Array.isArray(documents) || !connectionId || !sessionId) return documents;
+  return documents.map((document) => document.connectionId === connectionId
+    ? { ...document, sessionId }
+    : document);
+}
+
 export const STALE_REMOTE_FILE_REQUEST_CODE = "STALE_REMOTE_FILE_REQUEST";

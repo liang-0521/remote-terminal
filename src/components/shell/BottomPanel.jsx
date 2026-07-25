@@ -10,7 +10,7 @@ import { IconButton } from "../shared/IconButton.jsx";
 const MIN_PANEL_HEIGHT = 120;
 const MAX_PANEL_HEIGHT_RATIO = 0.45;
 
-export function BottomPanel({ collapsed, activeView = "transfer", filesContent = null, explorerPlacement = "bottom", transfers, servers, onViewChange, onExplorerPlacementChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
+export function BottomPanel({ collapsed, activeView = "transfer", filesContent = null, transfers, servers, onViewChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
   const dragState = useRef(null);
   const panelRef = useRef(null);
   const [panelHeight, setPanelHeight] = useState(MIN_PANEL_HEIGHT);
@@ -85,13 +85,6 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
           </button>
         </div>
         <span className="bottom-panel__actions">
-          {filesContent && activeView === "files" && (
-            <span className="explorer-placement" role="group" aria-label="资源管理器位置">
-              {[["left", "左"], ["bottom", "下"], ["right", "右"]].map(([value, label]) => (
-                <button key={value} type="button" aria-pressed={explorerPlacement === value} onClick={() => onExplorerPlacementChange?.(value)}>{label}</button>
-              ))}
-            </span>
-          )}
           <IconButton
             label={collapsed ? "展开面板" : "收起面板"}
             data-icon-direction={collapsed ? "up" : "down"}
@@ -101,13 +94,28 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
           </IconButton>
         </span>
       </div>
-      {!collapsed && (
-        <div className={`bottom-panel__content is-${activeView}`} role="region" aria-label={activeView === "files" ? "远程文件列表" : "传输任务列表"} tabIndex={0}>
-          {activeView === "files" && filesContent
-            ? filesContent
-            : <TransferView transfers={transfers} servers={servers} onCancel={onCancel} onRetry={onRetry} />}
+      <div className="bottom-panel__content" hidden={collapsed}>
+        {filesContent && (
+          <div
+            className="bottom-panel__view is-files"
+            role="tabpanel"
+            aria-label="远程文件列表"
+            hidden={activeView !== "files"}
+            tabIndex={activeView === "files" ? 0 : -1}
+          >
+            {filesContent}
+          </div>
+        )}
+        <div
+          className="bottom-panel__view is-transfer"
+          role={filesContent ? "tabpanel" : "region"}
+          aria-label="传输任务列表"
+          hidden={activeView !== "transfer"}
+          tabIndex={activeView === "transfer" ? 0 : -1}
+        >
+          <TransferView transfers={transfers} servers={servers} onCancel={onCancel} onRetry={onRetry} />
         </div>
-      )}
+      </div>
     </section>
   );
 }

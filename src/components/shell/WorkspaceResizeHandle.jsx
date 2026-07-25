@@ -56,7 +56,7 @@ export function WorkspaceResizeHandle({ width, placement = "left", onResize, onR
     <div
       className={`explorer-resize-handle explorer-resize-handle--${placement}`}
       role="separator"
-      aria-label="调整资源管理器宽度"
+      aria-label="调整左侧面板宽度"
       aria-orientation="vertical"
       aria-valuemin={MIN_EXPLORER_WIDTH}
       aria-valuemax={MAX_EXPLORER_WIDTH}

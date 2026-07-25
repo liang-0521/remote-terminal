@@ -25,6 +25,7 @@ import {
   applyWorkspaceSessionEvent,
   canUseRemoteFiles,
   isRemoteFileSessionCurrent,
+  rebindRemoteDocumentsToSession,
   STALE_REMOTE_FILE_REQUEST_CODE,
 } from "./services/workspace-session.js";
 import "./native-styles.css";
@@ -42,6 +43,7 @@ const DEFAULT_APPEARANCE = {
   accent: "#9d84f8",
   terminalBackground: "#061423",
   terminalForeground: "#c8cbd1",
+  terminalFontSize: 14,
   wallpaperOpacity: 0.22,
   wallpaperName: "",
   wallpaperUrl: "",
@@ -125,8 +127,6 @@ export function NativeApp() {
   const [activeRail, setActiveRail] = useState("connections");
   const [railExpanded, setRailExpanded] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(DEFAULT_EXPLORER_WIDTH);
-  const [explorerPlacement, setExplorerPlacement] = useState("left");
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const [connectionDialog, setConnectionDialog] = useState({ open: false, view: "list" });
   const [passwordConnectionId, setPasswordConnectionId] = useState(null);
@@ -140,6 +140,7 @@ export function NativeApp() {
   const [closeRequestActiveTransferCount, setCloseRequestActiveTransferCount] = useState(0);
   const [closeRequestDirtyDocuments, setCloseRequestDirtyDocuments] = useState([]);
   const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
+  const [uiScale, setUiScale] = useState(1);
   const [interfaceThemeMode, setInterfaceThemeMode] = useState("system");
   const [commandAssistanceMode, setCommandAssistanceMode] = useState("auto");
   const [monitorIntervalSeconds, setMonitorIntervalSeconds] = useState(1);
@@ -157,7 +158,7 @@ export function NativeApp() {
   const [bottomVisible, setBottomVisible] = useState(true);
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT);
-  const [bottomView, setBottomView] = useState("transfer");
+  const [bottomView, setBottomView] = useState("files");
   const [openDocuments, setOpenDocuments] = useState([]);
   const [activeDocumentKey, setActiveDocumentKey] = useState(null);
   const [unsavedChangesRequest, setUnsavedChangesRequest] = useState(null);
@@ -184,9 +185,8 @@ export function NativeApp() {
         if (cancelled) return;
         setInterfaceThemeMode(preferences.interfaceThemeMode);
         setAppearance((current) => ({ ...current, ...preferences.appearance }));
+        setUiScale(preferences.uiScale || 1);
         setExplorerWidth(Math.round(preferences.explorerWidth));
-        setExplorerPlacement(preferences.explorerPlacement || "left");
-        setExplorerCollapsed(Boolean(preferences.explorerCollapsed));
         setRailExpanded(preferences.railExpanded);
         setBottomVisible(true);
         setBottomCollapsed(preferences.bottomCollapsed);
@@ -213,11 +213,13 @@ export function NativeApp() {
         accent: appearance.accent,
         terminalBackground: appearance.terminalBackground,
         terminalForeground: appearance.terminalForeground,
+        terminalFontSize: appearance.terminalFontSize,
         wallpaperOpacity: appearance.wallpaperOpacity,
       },
+      uiScale,
       explorerWidth,
-      explorerPlacement,
-      explorerCollapsed,
+      explorerPlacement: "bottom",
+      explorerCollapsed: false,
       railExpanded,
       bottomVisible: true,
       bottomCollapsed,
@@ -241,6 +243,7 @@ export function NativeApp() {
   }, [
     appearance.accent,
     appearance.terminalBackground,
+    appearance.terminalFontSize,
     appearance.terminalForeground,
     appearance.wallpaperOpacity,
     bottomCollapsed,
@@ -249,11 +252,10 @@ export function NativeApp() {
     client,
     commandAssistanceMode,
     explorerWidth,
-    explorerPlacement,
-    explorerCollapsed,
     interfaceThemeMode,
     monitorIntervalSeconds,
     railExpanded,
+    uiScale,
     uiPreferencesReady,
   ]);
 
@@ -510,13 +512,6 @@ export function NativeApp() {
       if (event.state === "disconnected") directoryRequestsRef.current.delete(connectionId);
       updateWorkspace(connectionId, (workspace) => applyWorkspaceSessionEvent(workspace, event));
       if (event.error?.message) addIssue(connectionId, "SSH 会话错误", event.error.message, event.error.code);
-      if (event.state === "disconnected") {
-        setOpenDocuments((current) => {
-          const next = current.filter((document) => document.sessionId !== event.sessionId);
-          setActiveDocumentKey((activeKey) => next.some((document) => document.key === activeKey) ? activeKey : null);
-          return next;
-        });
-      }
     });
     const unsubscribeTransfer = client.events.onTransferProgress((event) => {
       if (!event?.connectionId || !event.sessionId) return;
@@ -669,11 +664,9 @@ export function NativeApp() {
   function openWorkspaceTab(connectionId) {
     setWorkspaceOrder((items) => items.includes(connectionId) ? items : [...items, connectionId]);
     setActiveConnectionId(connectionId);
-    setActiveRail("files");
-    if (explorerPlacement === "bottom") {
-      setBottomView("files");
-      setBottomCollapsed(false);
-    }
+    setActiveRail(null);
+    setBottomView("files");
+    setBottomCollapsed(false);
   }
 
   function selectServer(connectionId) {
@@ -712,6 +705,7 @@ export function NativeApp() {
         refreshDirectory = connectedWorkspace.directory;
         return connectedWorkspace;
       });
+      setOpenDocuments((current) => rebindRemoteDocumentsToSession(current, connectionId, result.sessionId));
       void loadCompletionCatalog(connectionId, result.sessionId);
       if (refreshDirectory) void loadDirectory(connectionId, refreshDirectory, result.sessionId);
       if (result.sftpError?.message) addIssue(connectionId, "SFTP 不可用", result.sftpError.message, result.sftpError.code);
@@ -1142,20 +1136,7 @@ export function NativeApp() {
   }
 
   function handleRailChange(item) {
-    setActiveRail(item);
-    if (item === "files" && explorerPlacement === "bottom") {
-      setBottomView("files");
-      setBottomCollapsed(false);
-    }
-  }
-
-  function changeExplorerPlacement(placement) {
-    setExplorerPlacement(placement);
-    setExplorerCollapsed(false);
-    if (placement === "bottom") {
-      setBottomView("files");
-      setBottomCollapsed(false);
-    }
+    setActiveRail((current) => current === item ? null : item);
   }
 
   function openRemoteTextFile({ entry, path }) {
@@ -1240,13 +1221,8 @@ export function NativeApp() {
   }, [activeConnectionId, activeWorkspace?.sessionId, activeWorkspace?.state, monitorIntervalSeconds, sampleMonitor]);
 
   const taskPanelHeight = bottomVisible && activeServer ? (bottomCollapsed ? 52 : bottomPanelHeight) : 0;
-  const explorerDockPlacement = activeRail === "files" ? explorerPlacement : "left";
-  const explorerDockCollapsed = activeRail === "files"
-    && explorerDockPlacement !== "bottom"
-    && explorerCollapsed;
-  const explorerDockWidth = explorerDockCollapsed ? 48 : explorerWidth;
-  const explorerDockedBelow = activeRail === "files" && explorerPlacement === "bottom";
-  const bottomFilesAvailable = Boolean(activeServer) && explorerPlacement === "bottom";
+  const sidePanelOpen = Boolean(activeRail);
+  const bottomFilesAvailable = Boolean(activeServer);
   const activeBottomView = bottomFilesAvailable && bottomView === "files" ? "files" : "transfer";
   const explorerPanelProps = {
     server: activeServer,
@@ -1278,8 +1254,6 @@ export function NativeApp() {
     onRefresh: () => activeWorkspace?.directory && void loadDirectory(activeConnectionId, activeWorkspace.directory),
     onNavigate: (path) => void loadDirectory(activeConnectionId, path),
     onListDirectory: listRemoteDirectory,
-    onPlacementChange: changeExplorerPlacement,
-    onToggleCollapsed: () => setExplorerCollapsed((value) => !value),
     onSelectServer: selectServer,
     onOpenConnections: openConnections,
   };
@@ -1296,7 +1270,13 @@ export function NativeApp() {
       className="app-root"
       data-color-scheme={interfaceColorScheme}
       data-theme-mode={interfaceThemeMode}
-      style={{ "--accent": appearance.accent, "--accent-contrast": accentContrast(appearance.accent) }}
+      style={{
+        "--accent": appearance.accent,
+        "--accent-contrast": accentContrast(appearance.accent),
+        width: `${100 / uiScale}%`,
+        height: `${100 / uiScale}%`,
+        zoom: uiScale,
+      }}
     >
       <main className={`app-shell ${railExpanded ? "is-rail-expanded" : ""}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>
         <TopBar
@@ -1309,7 +1289,7 @@ export function NativeApp() {
           onSelectServer={selectServer}
           onAddServer={() => openConnections("new")}
           onToggleRail={() => setRailExpanded((value) => !value)}
-          onOpenMonitor={() => activeServer && setActiveRail("monitor")}
+          onOpenMonitor={() => activeServer && setActiveRail((current) => current === "monitor" ? null : "monitor")}
         />
         <ActivityRail
           activeItem={activeRail}
@@ -1322,19 +1302,17 @@ export function NativeApp() {
         />
         <div
           className="workbench"
-          data-explorer-placement={explorerDockPlacement}
-          data-explorer-collapsed={explorerDockCollapsed ? "true" : "false"}
-          style={{ "--explorer-w": `${explorerDockWidth}px` }}
+          data-side-panel-open={sidePanelOpen ? "true" : "false"}
+          style={{ "--explorer-w": `${explorerWidth}px` }}
         >
-          {!explorerDockedBelow && <ExplorerPanel
+          {sidePanelOpen && <ExplorerPanel
             {...explorerPanelProps}
             mode={activeRail}
-            layout={explorerDockPlacement}
-            collapsed={explorerDockCollapsed}
+            layout="left"
           />}
-          {explorerDockPlacement !== "bottom" && !explorerDockCollapsed && <WorkspaceResizeHandle
+          {sidePanelOpen && <WorkspaceResizeHandle
             width={explorerWidth}
-            placement={explorerDockPlacement}
+            placement="left"
             onResize={setExplorerWidth}
             onReset={() => setExplorerWidth(DEFAULT_EXPLORER_WIDTH)}
           />}
@@ -1366,6 +1344,8 @@ export function NativeApp() {
                     client={client}
                     document={document}
                     appearance={appearance}
+                    connected={workspacesRef.current[document.connectionId]?.state === "connected"
+                      && workspacesRef.current[document.connectionId]?.sessionId === document.sessionId}
                     onDirtyChange={updateRemoteDocumentDirty}
                     onSaved={() => {
                       const workspace = workspacesRef.current[document.connectionId];
@@ -1388,14 +1368,12 @@ export function NativeApp() {
             collapsed={bottomCollapsed}
             activeView={activeBottomView}
             filesContent={bottomFilesAvailable ? <ExplorerPanel {...explorerPanelProps} mode="files" layout="bottom" embedded /> : null}
-            explorerPlacement={explorerPlacement}
             transfers={activeWorkspace?.transfers || []}
             servers={servers}
             onViewChange={(view) => {
               setBottomView(view);
               setBottomCollapsed(false);
             }}
-            onExplorerPlacementChange={changeExplorerPlacement}
             onToggle={() => setBottomCollapsed((value) => !value)}
             onResize={setBottomPanelHeight}
             onResetResize={() => setBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT)}
@@ -1446,6 +1424,8 @@ export function NativeApp() {
       <SettingsDialog
         open={settingsOpen}
         theme={appearance}
+        uiScale={uiScale}
+        onUiScaleChange={setUiScale}
         onThemeChange={(patch) => setAppearance((current) => ({ ...current, ...patch }))}
         onWallpaperChange={({ name, url }) => setAppearance((current) => ({ ...current, wallpaperName: name, wallpaperUrl: url }))}
         onRemoveWallpaper={() => setAppearance((current) => ({ ...current, wallpaperName: "", wallpaperUrl: "" }))}

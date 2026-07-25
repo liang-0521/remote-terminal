@@ -186,8 +186,8 @@ select:focus-visible {
   display: grid;
   grid-template-columns: var(--activity-rail-w) minmax(0, 1fr);
   grid-template-rows: var(--app-bar-h) minmax(0, 1fr);
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   background: var(--bg-app);
 }
 
@@ -866,6 +866,11 @@ select:focus-visible {
   background: var(--bg-tab-active);
 }
 
+.terminal-tab.is-split {
+  border-color: color-mix(in srgb, var(--accent), transparent 45%);
+  color: var(--text-strong);
+}
+
 .terminal-tab__select {
   display: flex;
   flex: 1;
@@ -893,10 +898,11 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.terminal-tab__split,
 .terminal-tab__close {
   display: grid;
   place-items: center;
-  flex: 0 0 30px;
+  flex: 0 0 28px;
   height: 100%;
   padding: 0;
   border: 0;
@@ -905,6 +911,22 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.terminal-tab__split {
+  opacity: 0;
+}
+
+.terminal-tab:hover .terminal-tab__split,
+.terminal-tab:focus-within .terminal-tab__split,
+.terminal-tab.is-split .terminal-tab__split {
+  opacity: 1;
+}
+
+.terminal-tab__split:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.terminal-tab__split:not(:disabled):hover,
 .terminal-tab__close:hover {
   color: var(--text-strong);
 }
@@ -1177,7 +1199,22 @@ select:focus-visible {
 
 .bottom-panel__content {
   height: calc(100% - 52px);
+  overflow: hidden;
+}
+
+.bottom-panel__view {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.bottom-panel__view.is-transfer {
   overflow: auto;
+}
+
+.bottom-panel__view.is-files {
+  overflow: hidden;
 }
 
 .transfer-table {
@@ -2389,6 +2426,40 @@ progress::-webkit-progress-value {
 .settings-form__range small {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.settings-form__display-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(260px, 1.3fr);
+  gap: 14px;
+}
+
+.settings-form__display-grid > label {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.settings-form__display-grid select {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-input);
+}
+
+.settings-form__display-grid small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settings-form__display-grid .settings-form__font-size {
+  margin-top: 0;
 }
 
 .settings-form__footer {

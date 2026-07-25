@@ -41,7 +41,7 @@ export function MonitorDashboard({ server, metrics, sampledAt, loading = false, 
   return (
     <div className={`monitor-dashboard ${compact ? "is-compact" : ""}`}>
       <section className="monitor-dashboard__region monitor-dashboard__region--system" aria-label="系统信息">
-        <RegionHeader icon={<DesktopTower size={18} />} title="系统概览" meta={loading ? "正在刷新" : `采样于 ${sampledAt}`} />
+        <RegionHeader icon={<DesktopTower size={18} />} title="系统概览" meta={`采样于 ${sampledAt}`} />
         {error && <div className="monitor-dashboard__warning" role="alert">{error}，当前显示上一次成功采样。</div>}
         <dl className="monitor-dashboard__facts">
           <Fact label="服务器" value={server.endpoint} />

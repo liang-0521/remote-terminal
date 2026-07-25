@@ -6,6 +6,7 @@ import {
   canUseRemoteFiles,
   isRemoteFileRequestCurrent,
   isRemoteFileSessionCurrent,
+  rebindRemoteDocumentsToSession,
 } from "../src/services/workspace-session.js";
 
 function connectedWorkspace(overrides = {}) {
@@ -84,4 +85,18 @@ test("目录树请求同时按工作区和会话代次隔离", () => {
   assert.equal(isRemoteFileRequestCurrent(oldRequest, { treeKey: "server-2", sessionKey: "session-old" }), false);
   assert.equal(isRemoteFileSessionCurrent(connectedWorkspace(), "session-old"), true);
   assert.equal(isRemoteFileSessionCurrent(connectedWorkspace(), "session-new"), false);
+});
+
+test("重连只重绑所属服务器的已打开文件，不清空标签或内容状态", () => {
+  const documents = [
+    { key: "server-1:/var/log/app.log", connectionId: "server-1", sessionId: "session-old", dirty: false },
+    { key: "server-2:/etc/hosts", connectionId: "server-2", sessionId: "session-2", dirty: true },
+  ];
+
+  const rebound = rebindRemoteDocumentsToSession(documents, "server-1", "session-new");
+
+  assert.equal(rebound.length, 2);
+  assert.equal(rebound[0].sessionId, "session-new");
+  assert.equal(rebound[1].sessionId, "session-2");
+  assert.equal(rebound[1].dirty, true);
 });

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Children, cloneElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ClockCounterClockwise,
+  Columns,
   FileText,
   MagnifyingGlass,
   Plus,
@@ -32,6 +33,11 @@ import {
   readTerminalSelection,
   shouldFocusTerminal,
 } from "../../services/terminal-context-menu.js";
+import {
+  reconcileSecondaryTabKey,
+  resolveWorkspaceSplit,
+  workspaceTabKey,
+} from "../../services/workspace-split.js";
 import { IconButton } from "../shared/IconButton.jsx";
 import { TerminalContextMenu } from "./TerminalContextMenu.jsx";
 
@@ -56,13 +62,21 @@ export function NativeTerminalPane({
 }) {
   const tabRefs = useRef(new Map());
   const keyboardTabTargetRef = useRef(null);
+  const [secondaryTabKey, setSecondaryTabKey] = useState(null);
+  const [draggedTabKey, setDraggedTabKey] = useState(null);
   const workspaceTabs = useMemo(() => [
-    ...sessions.map((session) => ({ key: `session:${session.id}`, type: "session", value: session })),
-    ...documents.map((document) => ({ key: `document:${document.key}`, type: "document", value: document })),
+    ...sessions.map((session) => ({ key: workspaceTabKey("session", session.id), type: "session", value: session })),
+    ...documents.map((document) => ({ key: workspaceTabKey("document", document.key), type: "document", value: document })),
   ], [documents, sessions]);
   const activeTabKey = activeDocumentKey
-    ? `document:${activeDocumentKey}`
-    : `session:${activeSessionId}`;
+    ? workspaceTabKey("document", activeDocumentKey)
+    : workspaceTabKey("session", activeSessionId);
+  const workspaceTabKeys = useMemo(() => workspaceTabs.map((tab) => tab.key), [workspaceTabs]);
+  const secondaryTab = workspaceTabs.find((tab) => tab.key === secondaryTabKey) || null;
+
+  useEffect(() => {
+    setSecondaryTabKey((current) => reconcileSecondaryTabKey(current, workspaceTabKeys, activeTabKey));
+  }, [activeTabKey, workspaceTabKeys]);
 
   useEffect(() => {
     const targetKey = keyboardTabTargetRef.current;
@@ -79,12 +93,40 @@ export function NativeTerminalPane({
   }, [activeTabKey, workspaceTabs]);
 
   function activateTab(tab) {
+    if (tab.key === secondaryTabKey) setSecondaryTabKey(null);
     if (tab.type === "session") {
       onDocumentSelect?.(null);
       onSessionSelect(tab.value.id);
       return;
     }
     onDocumentSelect?.(tab.value.key);
+  }
+
+  function splitWorkspaceTab(tabKey) {
+    const split = resolveWorkspaceSplit(tabKey, workspaceTabKeys, activeTabKey);
+    if (!split) return;
+    if (split.primaryTabKey !== activeTabKey) {
+      const primaryTab = workspaceTabs.find((tab) => tab.key === split.primaryTabKey);
+      if (primaryTab) activateTab(primaryTab);
+    }
+    setSecondaryTabKey(split.secondaryTabKey);
+  }
+
+  function handleTabDragStart(event, tabKey) {
+    if (workspaceTabs.length < 2) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-remote-terminal-tab", tabKey);
+    setDraggedTabKey(tabKey);
+  }
+
+  function dropWorkspaceTab(event) {
+    event.preventDefault();
+    const tabKey = event.dataTransfer.getData("application/x-remote-terminal-tab") || draggedTabKey;
+    setDraggedTabKey(null);
+    splitWorkspaceTab(tabKey);
   }
 
   function selectRelativeTab(event, currentIndex) {
@@ -124,13 +166,20 @@ export function NativeTerminalPane({
       <div className="terminal-tabs" role="tablist" aria-label="终端和远程文件工作区">
         {workspaceTabs.map((tab, index) => {
           const selected = activeTabKey === tab.key;
+          const splitVisible = secondaryTabKey === tab.key;
           const isSession = tab.type === "session";
           const item = tab.value;
           const tabId = isSession ? `terminal-tab-${item.id}` : `document-tab-${item.key}`;
           const panelId = isSession ? `terminal-panel-${item.id}` : `document-panel-${item.key}`;
           const TabIcon = isSession ? TerminalIcon : FileText;
           return (
-            <div key={tab.key} className={`terminal-tab ${isSession ? "" : "is-document"} ${selected ? "is-active" : ""}`}>
+            <div
+              key={tab.key}
+              className={`terminal-tab ${isSession ? "" : "is-document"} ${selected ? "is-active" : ""} ${splitVisible ? "is-split" : ""}`}
+              draggable={workspaceTabs.length > 1}
+              onDragStart={(event) => handleTabDragStart(event, tab.key)}
+              onDragEnd={() => setDraggedTabKey(null)}
+            >
               <button
                 ref={(element) => {
                   if (element) tabRefs.current.set(tab.key, element);
@@ -152,6 +201,15 @@ export function NativeTerminalPane({
               </button>
               <button
                 type="button"
+                className="terminal-tab__split"
+                aria-label={`在右侧并排打开 ${item.label || item.name}`}
+                disabled={workspaceTabs.length < 2 || splitVisible}
+                onClick={() => splitWorkspaceTab(tab.key)}
+              >
+                <Columns size={15} />
+              </button>
+              <button
+                type="button"
                 className="terminal-tab__close"
                 aria-label={`关闭 ${item.label || item.name}`}
                 onClick={() => isSession ? onSessionClose(item.id) : onDocumentClose?.(item.key)}
@@ -164,48 +222,91 @@ export function NativeTerminalPane({
         <IconButton label="新增服务器工作区" onClick={onSessionAdd}><Plus size={21} /></IconButton>
       </div>
 
-      <div className={`native-terminal-stack ${activeDocumentKey ? "is-hidden" : ""}`} aria-hidden={Boolean(activeDocumentKey)}>
-        {sessions.map((session) => (
-          <div
-            key={session.id}
-            id={`terminal-panel-${session.id}`}
-            role="tabpanel"
-            aria-labelledby={`terminal-tab-${session.id}`}
-            hidden={activeSessionId !== session.id}
-            className={`native-terminal-slot ${activeSessionId === session.id ? "is-active" : ""}`}
-          >
-            {appearance.wallpaperUrl && (
-              <div
-                className="terminal-wallpaper"
-                aria-hidden="true"
-                style={{
-                  backgroundImage: `url(${JSON.stringify(appearance.wallpaperUrl)})`,
-                  opacity: appearance.wallpaperOpacity,
-                }}
-              />
-            )}
-            <XtermSurface
-              client={client}
-              sessionId={session.sessionId}
-              connectionId={session.id}
-              connectionState={session.state}
-              connectionError={session.error}
-              active={!activeDocumentKey && activeSessionId === session.id}
-              focusTerminalOnActivate={keyboardTabTargetRef.current !== `session:${session.id}`}
-              appearance={appearance}
-              commandAssistanceMode={commandAssistanceMode}
-              remoteCompletions={session.completionCatalog}
-              completionLoading={session.completionLoading}
-              completionError={session.completionError}
-              directoryEntries={session.directoryEntries}
-              onReconnect={onReconnect}
-              onError={onTerminalError}
-            />
+      <div
+        className={`native-workspace-grid ${secondaryTab ? "is-split" : ""} ${draggedTabKey ? "is-dragging-tab" : ""}`}
+        onDragOver={(event) => {
+          if (!draggedTabKey) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={dropWorkspaceTab}
+      >
+        {secondaryTab && (
+          <div className="native-workspace-split__header">
+            <Columns size={15} aria-hidden="true" />
+            <span title={secondaryTab.value.label || secondaryTab.value.name}>
+              {secondaryTab.value.label || secondaryTab.value.name}
+            </span>
+            <button type="button" aria-label="关闭右侧并排视图" onClick={() => setSecondaryTabKey(null)}>
+              <X size={15} />
+            </button>
           </div>
-        ))}
-      </div>
-      <div className={`native-document-stack ${activeDocumentKey ? "is-active" : ""}`} aria-hidden={!activeDocumentKey}>
-        {children}
+        )}
+        {draggedTabKey && (
+          <div className="native-workspace-split__drop-zone" aria-hidden="true">
+            <Columns size={22} />
+            <span>拖到这里并排打开</span>
+          </div>
+        )}
+        {sessions.map((session) => {
+          const tabKey = workspaceTabKey("session", session.id);
+          const workspaceSlot = tabKey === activeTabKey
+            ? "primary"
+            : tabKey === secondaryTabKey
+              ? "secondary"
+              : null;
+          return (
+            <div
+              key={session.id}
+              id={`terminal-panel-${session.id}`}
+              role="tabpanel"
+              aria-labelledby={`terminal-tab-${session.id}`}
+              hidden={!workspaceSlot}
+              className={`native-terminal-slot ${workspaceSlot ? `is-${workspaceSlot}` : ""}`}
+            >
+              {appearance.wallpaperUrl && (
+                <div
+                  className="terminal-wallpaper"
+                  aria-hidden="true"
+                  style={{
+                    backgroundImage: `url(${JSON.stringify(appearance.wallpaperUrl)})`,
+                    opacity: appearance.wallpaperOpacity,
+                  }}
+                />
+              )}
+              <XtermSurface
+                client={client}
+                sessionId={session.sessionId}
+                connectionId={session.id}
+                connectionState={session.state}
+                connectionError={session.error}
+                active={Boolean(workspaceSlot)}
+                focusTerminalOnActivate={workspaceSlot === "primary" && keyboardTabTargetRef.current !== tabKey}
+                appearance={appearance}
+                commandAssistanceMode={commandAssistanceMode}
+                remoteCompletions={session.completionCatalog}
+                completionLoading={session.completionLoading}
+                completionError={session.completionError}
+                directoryEntries={session.directoryEntries}
+                onReconnect={onReconnect}
+                onError={onTerminalError}
+              />
+            </div>
+          );
+        })}
+        {Children.map(children, (child) => {
+          if (!child?.props?.document?.key) return child;
+          const tabKey = workspaceTabKey("document", child.props.document.key);
+          const workspaceSlot = tabKey === activeTabKey
+            ? "primary"
+            : tabKey === secondaryTabKey
+              ? "secondary"
+              : null;
+          return cloneElement(child, {
+            active: Boolean(workspaceSlot),
+            workspaceSlot,
+          });
+        })}
       </div>
     </section>
   );
@@ -646,12 +747,18 @@ function XtermSurface({
   }, [appearance.accent, appearance.terminalBackground, appearance.terminalForeground]);
 
   useEffect(() => {
+    if (!terminalRef.current) return;
+    terminalRef.current.options.fontSize = appearance.terminalFontSize || 14;
+    fitRef.current?.fit();
+  }, [appearance.terminalFontSize]);
+
+  useEffect(() => {
     const element = containerRef.current;
     const terminal = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
       fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, monospace',
-      fontSize: 14,
+      fontSize: appearance.terminalFontSize || 14,
       lineHeight: 1.2,
       scrollback: 10_000,
       allowTransparency: true,
