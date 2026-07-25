@@ -1636,8 +1636,8 @@ progress::-webkit-progress-value {
 .connection-manager {
   display: flex;
   flex-direction: column;
-  width: min(820px, calc(100vw - 48px));
-  max-height: min(760px, calc(100vh - 48px));
+  width: min(820px, 100%);
+  max-height: min(760px, 100%);
   overflow: hidden;
   border: 1px solid #35495f;
   border-radius: 10px;
@@ -1991,8 +1991,8 @@ progress::-webkit-progress-value {
 .settings-panel {
   display: flex;
   flex-direction: column;
-  width: min(940px, calc(100vw - 48px));
-  max-height: min(820px, calc(100vh - 48px));
+  width: min(940px, 100%);
+  max-height: min(820px, 100%);
   overflow: hidden;
   border: 1px solid #35495f;
   border-radius: 10px;
