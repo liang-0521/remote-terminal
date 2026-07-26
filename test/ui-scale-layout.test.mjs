@@ -26,3 +26,13 @@ test("所有可选比例的反向画布尺寸在缩放后都等于完整视口",
     assert.ok(Math.abs(layoutPercent * scale - 100) < Number.EPSILON * 100);
   }
 });
+
+test("底部面板拖动统一使用逻辑高度并换算缩放后的指针位移", async () => {
+  const source = await readFile(new URL("../src/components/shell/BottomPanel.jsx", import.meta.url), "utf8");
+
+  assert.match(source, /const nextHeight = panel\.offsetHeight/);
+  assert.match(source, /startHeight: panel\.offsetHeight/);
+  assert.match(source, /renderedHeight \/ panel\.offsetHeight/);
+  assert.match(source, /\(dragState\.current\.startY - event\.clientY\) \/ dragState\.current\.scaleY/);
+  assert.match(source, /closest\("\.bottom-panel"\)\.offsetHeight/);
+});

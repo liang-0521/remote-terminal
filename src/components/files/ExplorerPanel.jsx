@@ -25,6 +25,7 @@ import {
   isRemoteFileRequestCurrent,
   STALE_REMOTE_FILE_REQUEST_CODE,
 } from "../../services/workspace-session.js";
+import { parseRemotePathInput } from "../../services/remote-path-input.js";
 
 export function ExplorerPanel({ mode, layout = "left", collapsed = false, embedded = false, server, servers, activeServerId, fileState, metrics, sampledAt, monitorLoading = false, monitorError = "", monitorIntervalSeconds = 1, onMonitorIntervalChange, onUpload, onSelectUploadFiles, onNativeDragDropSubscribe, onDownloadRemoteFile, onRenameRemoteEntry, onDeleteRemoteEntry, onCreateRemoteEntry, onOpenTextFile, onRefresh, onNavigate, onListDirectory, onPlacementChange, onToggleCollapsed, onSelectServer, onOpenConnections }) {
   if (mode === "connections") {
@@ -73,6 +74,7 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
   const [createRequest, setCreateRequest] = useState(null);
   const [focusedFileRow, setFocusedFileRow] = useState(0);
   const [pathDraft, setPathDraft] = useState(fileState?.path || "");
+  const [pathInputError, setPathInputError] = useState("");
   const available = Boolean(fileState?.available);
   uploadRef.current = onUpload;
 
@@ -181,6 +183,7 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
 
   useEffect(() => {
     setPathDraft(currentPath || "");
+    setPathInputError("");
   }, [currentPath]);
 
   useEffect(() => {
@@ -310,13 +313,30 @@ function RemoteFiles({ treeKey, layout, collapsed, embedded, fileState, onUpload
         aria-label={`当前远程路径：${currentPath || "SFTP 不可用"}`}
         onSubmit={(event) => {
           event.preventDefault();
-          const nextPath = pathDraft.trim();
-          if (nextPath) onNavigate?.(nextPath);
+          try {
+            const nextPath = parseRemotePathInput(pathDraft, currentPath);
+            setPathInputError("");
+            setPathDraft(nextPath);
+            if (nextPath !== currentPath) onNavigate?.(nextPath);
+          } catch (error) {
+            setPathInputError(error?.message || "无法识别远程路径。");
+          }
         }}
       >
-        <input value={pathDraft} disabled={!available || !currentPath} aria-label="远程路径" onChange={(event) => setPathDraft(event.target.value)} />
+        <input
+          value={pathDraft}
+          disabled={!available || !currentPath}
+          aria-label="远程路径，支持绝对路径或 cd 路径"
+          aria-invalid={Boolean(pathInputError)}
+          placeholder="/路径 或 cd 路径"
+          onChange={(event) => {
+            setPathDraft(event.target.value);
+            setPathInputError("");
+          }}
+        />
         <button type="submit" disabled={!available || !pathDraft.trim() || pathDraft.trim() === currentPath}>转到</button>
       </form>
+      {pathInputError && <div className="file-tree__download-status is-error" role="alert">{pathInputError}</div>}
 
       <div className={`remote-file-manager is-${layout}`}>
         <RemoteDirectoryTree

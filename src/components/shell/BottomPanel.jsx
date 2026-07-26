@@ -21,7 +21,7 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
     const panel = panelRef.current;
     if (!panel) return undefined;
     const updateHeight = () => {
-      const nextHeight = Math.round(panel.getBoundingClientRect().height);
+      const nextHeight = panel.offsetHeight;
       setPanelHeight((current) => current === nextHeight ? current : nextHeight);
     };
     const observer = new ResizeObserver(updateHeight);
@@ -33,13 +33,20 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
   function startResize(event) {
     if (collapsed) return;
     const panel = event.currentTarget.closest(".bottom-panel");
-    dragState.current = { startY: event.clientY, startHeight: panel.getBoundingClientRect().height };
+    const renderedHeight = panel.getBoundingClientRect().height;
+    const scaleY = panel.offsetHeight > 0 ? renderedHeight / panel.offsetHeight : 1;
+    dragState.current = {
+      startY: event.clientY,
+      startHeight: panel.offsetHeight,
+      scaleY: Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1,
+    };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   function resize(event) {
     if (!dragState.current) return;
-    const nextHeight = dragState.current.startHeight + dragState.current.startY - event.clientY;
+    const pointerDelta = (dragState.current.startY - event.clientY) / dragState.current.scaleY;
+    const nextHeight = dragState.current.startHeight + pointerDelta;
     onResize(Math.round(Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, nextHeight))));
   }
 
@@ -51,7 +58,7 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
   function resizeWithKeyboard(event) {
     if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
-    const panelHeight = event.currentTarget.closest(".bottom-panel").getBoundingClientRect().height;
+    const panelHeight = event.currentTarget.closest(".bottom-panel").offsetHeight;
     const delta = event.key === "ArrowUp" ? 16 : -16;
     onResize(Math.round(Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight + delta))));
   }
