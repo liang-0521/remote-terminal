@@ -75,12 +75,14 @@ pub fn restore_saved_window_placement<R: Runtime>(app: &AppHandle<R>) -> AppResu
     {
         return Ok(());
     }
-    let bounds = monitors.iter().map(monitor_bounds).collect::<Vec<_>>();
-    let position = constrain_window_position(placement, &bounds)
-        .unwrap_or_else(|| PhysicalPosition::new(placement.x, placement.y));
+    // A disconnected monitor may leave a saved window completely unreachable.
+    // Partially visible positions remain valid so Windows can preserve native
+    // edge hiding and layouts that span monitors with different dimensions.
     window
         .placement_set_size(PhysicalSize::new(placement.width, placement.height))
-        .and_then(|_| window.placement_set_position(position))
+        .and_then(|_| {
+            window.placement_set_position(PhysicalPosition::new(placement.x, placement.y))
+        })
         .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法恢复上次的窗口位置。"))?;
     if placement.maximized {
         window
@@ -144,15 +146,10 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
         return;
     }
 
-    if matches!(event, WindowEvent::Moved(_)) {
-        if constrain_normal_window_position(window) {
-            return;
-        }
-        remember_normal_window_placement(&window.state::<AppState>(), window);
-        return;
-    }
-
-    if matches!(event, WindowEvent::Resized(_)) {
+    if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+        // Never call set_position while Windows is handling a live move. Native
+        // dragging must allow partial off-screen placement and cross-monitor
+        // transitions without an application-level collision boundary.
         remember_normal_window_placement(&window.state::<AppState>(), window);
         return;
     }
@@ -312,29 +309,6 @@ fn remember_normal_window_placement(state: &AppState, window: &impl WindowPlacem
     }
 }
 
-fn constrain_normal_window_position(window: &impl WindowPlacementTarget) -> bool {
-    if window.placement_is_minimized().unwrap_or(false)
-        || window.placement_is_maximized().unwrap_or(false)
-    {
-        return false;
-    }
-    let Ok(placement) = current_window_placement(window, false) else {
-        return false;
-    };
-    let Ok(monitors) = window.placement_available_monitors() else {
-        return false;
-    };
-    let bounds = monitors.iter().map(monitor_bounds).collect::<Vec<_>>();
-    let Some(position) = constrain_window_position(placement, &bounds) else {
-        return false;
-    };
-    if window.placement_set_position(position).is_err() {
-        eprintln!("[remote-terminal] constrain window position: WINDOW_PLACEMENT_FAILED");
-        return false;
-    }
-    true
-}
-
 fn persist_window_placement(state: &AppState, window: &impl WindowPlacementTarget) {
     let maximized = window.placement_is_maximized().unwrap_or(false);
     let placement = if maximized {
@@ -374,7 +348,11 @@ fn current_window_placement(
 }
 
 fn placement_intersects_monitor(placement: WindowPlacement, monitor: &Monitor) -> bool {
-    window_monitor_intersection_area(placement, monitor_bounds(monitor)) > 0
+    placement_intersects_bounds(placement, monitor_bounds(monitor))
+}
+
+fn placement_intersects_bounds(placement: WindowPlacement, monitor: MonitorBounds) -> bool {
+    window_monitor_intersection_area(placement, monitor) > 0
 }
 
 fn monitor_bounds(monitor: &Monitor) -> MonitorBounds {
@@ -397,74 +375,11 @@ fn window_bounds(placement: WindowPlacement) -> MonitorBounds {
     }
 }
 
-fn bounds_contains_point(bounds: MonitorBounds, x: i64, y: i64) -> bool {
-    x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom
-}
-
-fn window_is_fully_visible(placement: WindowPlacement, monitors: &[MonitorBounds]) -> bool {
-    let window = window_bounds(placement);
-    let right = window.right.saturating_sub(1);
-    let bottom = window.bottom.saturating_sub(1);
-    [
-        (window.left, window.top),
-        (right, window.top),
-        (window.left, bottom),
-        (right, bottom),
-    ]
-    .into_iter()
-    .all(|(x, y)| {
-        monitors
-            .iter()
-            .any(|monitor| bounds_contains_point(*monitor, x, y))
-    })
-}
-
 fn window_monitor_intersection_area(placement: WindowPlacement, monitor: MonitorBounds) -> i64 {
     let window = window_bounds(placement);
     let width = window.right.min(monitor.right) - window.left.max(monitor.left);
     let height = window.bottom.min(monitor.bottom) - window.top.max(monitor.top);
     width.max(0) * height.max(0)
-}
-
-fn clamp_axis(position: i64, window_size: i64, start: i64, end: i64) -> i64 {
-    let monitor_size = (end - start).max(0);
-    let maximum = if window_size >= monitor_size {
-        start
-    } else {
-        end - window_size
-    };
-    position.clamp(start, maximum)
-}
-
-fn physical_coordinate(value: i64) -> i32 {
-    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
-fn constrain_window_position(
-    placement: WindowPlacement,
-    monitors: &[MonitorBounds],
-) -> Option<PhysicalPosition<i32>> {
-    if monitors.is_empty() || window_is_fully_visible(placement, monitors) {
-        return None;
-    }
-    let target = monitors
-        .iter()
-        .copied()
-        .max_by_key(|monitor| window_monitor_intersection_area(placement, *monitor))?;
-    let x = clamp_axis(
-        i64::from(placement.x),
-        i64::from(placement.width),
-        target.left,
-        target.right,
-    );
-    let y = clamp_axis(
-        i64::from(placement.y),
-        i64::from(placement.height),
-        target.top,
-        target.bottom,
-    );
-    let position = PhysicalPosition::new(physical_coordinate(x), physical_coordinate(y));
-    (position.x != placement.x || position.y != placement.y).then_some(position)
 }
 
 fn clear_pending_close_request<R: Runtime>(app: &AppHandle<R>) {
@@ -520,47 +435,50 @@ mod tests {
     }
 
     #[test]
-    fn visible_window_position_is_not_changed() {
-        let monitors = [monitor(0, 0, 1920, 1080)];
-        assert_eq!(
-            constrain_window_position(placement(120, 80, 1440, 900), &monitors),
-            None
-        );
+    fn partially_offscreen_window_remains_restorable() {
+        let primary = monitor(0, 0, 1920, 1080);
+        assert!(placement_intersects_bounds(
+            placement(-28, 40, 1440, 900),
+            primary
+        ));
+        assert!(placement_intersects_bounds(
+            placement(1700, 800, 500, 500),
+            primary
+        ));
     }
 
     #[test]
-    fn window_dragged_outside_left_edge_is_recovered() {
-        let monitors = [monitor(0, 0, 1920, 1080)];
-        assert_eq!(
-            constrain_window_position(placement(-28, 40, 1440, 900), &monitors),
-            Some(PhysicalPosition::new(0, 40))
-        );
+    fn fully_offscreen_window_is_not_restored() {
+        let primary = monitor(0, 0, 1920, 1080);
+        assert!(!placement_intersects_bounds(
+            placement(-500, 40, 400, 400),
+            primary
+        ));
+        assert!(!placement_intersects_bounds(
+            placement(1920, 0, 500, 500),
+            primary
+        ));
+        assert!(!placement_intersects_bounds(
+            placement(0, 1080, 500, 500),
+            primary
+        ));
     }
 
     #[test]
-    fn window_dragged_outside_right_or_bottom_edge_is_recovered() {
-        let monitors = [monitor(0, 0, 1920, 1080)];
-        assert_eq!(
-            constrain_window_position(placement(1700, 800, 500, 500), &monitors),
-            Some(PhysicalPosition::new(1420, 580))
-        );
-    }
-
-    #[test]
-    fn window_can_span_adjacent_monitors_without_being_snapped_back() {
-        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 0, 1920, 1080)];
-        assert_eq!(
-            constrain_window_position(placement(1500, 100, 1000, 800), &monitors),
-            None
-        );
+    fn window_can_span_monitors_with_different_heights() {
+        let primary = monitor(0, 0, 2048, 1280);
+        let secondary = monitor(2048, 0, 2048, 1152);
+        let spanning = placement(1700, 500, 1000, 900);
+        assert!(placement_intersects_bounds(spanning, primary));
+        assert!(placement_intersects_bounds(spanning, secondary));
     }
 
     #[test]
     fn negative_coordinate_monitor_is_a_valid_desktop_region() {
-        let monitors = [monitor(-1920, 0, 1920, 1080), monitor(0, 0, 1920, 1080)];
-        assert_eq!(
-            constrain_window_position(placement(-1800, 100, 1200, 800), &monitors),
-            None
-        );
+        let secondary = monitor(-1920, 0, 1920, 1080);
+        assert!(placement_intersects_bounds(
+            placement(-1800, 100, 1200, 800),
+            secondary
+        ));
     }
 }
