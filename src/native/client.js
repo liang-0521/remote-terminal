@@ -7,6 +7,7 @@ import { open as tauriOpenDialog } from "@tauri-apps/plugin-dialog";
 import { check as tauriCheckForUpdate } from "@tauri-apps/plugin-updater";
 
 const WINDOWS_ABSOLUTE_PATH = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/;
+const UI_SCALE_FACTORS = new Set([0.8, 0.9, 1, 1.1, 1.25, 1.5]);
 
 const TAURI_COMMANDS = Object.freeze({
   connectionsList: "connections_list",
@@ -65,6 +66,7 @@ const PRODUCTION_TAURI_API = Object.freeze({
   getVersion,
   checkForUpdate: tauriCheckForUpdate,
   onDragDrop: (callback) => getCurrentWebviewWindow().onDragDropEvent(callback),
+  setWebviewZoom: (scaleFactor) => getCurrentWebviewWindow().setZoom(scaleFactor),
 });
 
 export class NativeClientError extends Error {
@@ -95,6 +97,17 @@ function invokeTauri(api, command, args = undefined) {
   return Promise.resolve()
     .then(() => api.invoke(command, args))
     .catch((error) => { throw normalizeError(error); });
+}
+
+function applyWebviewZoom(api, scaleFactor) {
+  if (!UI_SCALE_FACTORS.has(scaleFactor)) {
+    throw new NativeClientError("INVALID_UI_SCALE", "界面缩放设置无效。");
+  }
+  return Promise.resolve()
+    .then(() => api.setWebviewZoom(scaleFactor))
+    .catch((error) => {
+      throw normalizeError(error, "WEBVIEW_ZOOM_FAILED", "无法应用界面缩放。");
+    });
 }
 
 function assertCallback(callback) {
@@ -530,8 +543,15 @@ function createTauriClient(api) {
     app: Object.freeze({
       getCloseBehavior: () => call(TAURI_COMMANDS.getCloseBehavior),
       setCloseBehavior: (behavior) => call(TAURI_COMMANDS.setCloseBehavior, { behavior }),
-      getUiPreferences: () => call(TAURI_COMMANDS.getUiPreferences),
-      setUiPreferences: (preferences) => call(TAURI_COMMANDS.setUiPreferences, { preferences }),
+      getUiPreferences: () => call(TAURI_COMMANDS.getUiPreferences)
+        .then(async (preferences) => {
+          await applyWebviewZoom(api, preferences.uiScale);
+          return preferences;
+        }),
+      setUiPreferences: async (preferences) => {
+        await applyWebviewZoom(api, preferences.uiScale);
+        return call(TAURI_COMMANDS.setUiPreferences, { preferences });
+      },
       resolveCloseRequest: (requestId, action) => call(TAURI_COMMANDS.resolveCloseRequest, { requestId, action }),
       showMainWindow: () => call(TAURI_COMMANDS.showMainWindow),
       quit: () => call(TAURI_COMMANDS.quitApp),
@@ -567,6 +587,7 @@ export function createNativeClient(api) {
     "getVersion",
     "checkForUpdate",
     "onDragDrop",
+    "setWebviewZoom",
   ];
   if (!api || requiredMethods.some((method) => typeof api[method] !== "function")) {
     throw new TypeError("Tauri 客户端缺少完整的 API 适配器");

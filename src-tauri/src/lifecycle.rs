@@ -28,6 +28,8 @@ struct MonitorBounds {
     bottom: i64,
 }
 
+const WINDOW_RECOVERY_MARGIN: i64 = 32;
+
 pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
     let window = app
         .get_webview_window("main")
@@ -43,6 +45,7 @@ pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
     window
         .show()
         .map_err(|_| AppError::new("MAIN_WINDOW_RESTORE_FAILED", "无法显示主窗口。"))?;
+    recover_main_window_visibility(&window)?;
     window
         .set_focus()
         .map_err(|_| AppError::new("MAIN_WINDOW_RESTORE_FAILED", "无法聚焦主窗口。"))
@@ -53,6 +56,46 @@ pub fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
         .ok_or_else(|| AppError::new("MAIN_WINDOW_UNAVAILABLE", "主窗口当前不可用。"))?
         .hide()
         .map_err(|_| AppError::new("MAIN_WINDOW_HIDE_FAILED", "无法隐藏主窗口。"))
+}
+
+fn recover_main_window_visibility<R: Runtime>(window: &WebviewWindow<R>) -> AppResult<()> {
+    let maximized = window
+        .is_maximized()
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法读取主窗口状态。"))?;
+    let placement = current_window_placement(window, maximized)
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法读取主窗口位置。"))?;
+    let monitors = window
+        .available_monitors()
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法检查可用显示器。"))?;
+    if monitors
+        .iter()
+        .any(|monitor| placement_intersects_monitor(placement, monitor))
+    {
+        return Ok(());
+    }
+    let primary = window
+        .primary_monitor()
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法检查主显示器。"))?;
+    let target = primary
+        .as_ref()
+        .or_else(|| monitors.first())
+        .ok_or_else(|| AppError::new("WINDOW_PLACEMENT_FAILED", "当前没有可用的显示器。"))?;
+    let recovered = recover_window_placement(placement, monitor_bounds(target));
+    if maximized {
+        window
+            .unmaximize()
+            .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法恢复主窗口状态。"))?;
+    }
+    window
+        .set_size(PhysicalSize::new(recovered.width, recovered.height))
+        .and_then(|_| window.set_position(PhysicalPosition::new(recovered.x, recovered.y)))
+        .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法将主窗口移回当前桌面。"))?;
+    if maximized {
+        window
+            .maximize()
+            .map_err(|_| AppError::new("WINDOW_PLACEMENT_FAILED", "无法恢复主窗口最大化状态。"))?;
+    }
+    Ok(())
 }
 
 pub fn restore_saved_window_placement<R: Runtime>(app: &AppHandle<R>) -> AppResult<()> {
@@ -382,6 +425,40 @@ fn window_monitor_intersection_area(placement: WindowPlacement, monitor: Monitor
     width.max(0) * height.max(0)
 }
 
+fn recovery_bounds(monitor: MonitorBounds) -> MonitorBounds {
+    let width = (monitor.right - monitor.left).max(1);
+    let height = (monitor.bottom - monitor.top).max(1);
+    let horizontal_margin = WINDOW_RECOVERY_MARGIN.min(width.saturating_sub(1) / 2);
+    let vertical_margin = WINDOW_RECOVERY_MARGIN.min(height.saturating_sub(1) / 2);
+    MonitorBounds {
+        left: monitor.left + horizontal_margin,
+        top: monitor.top + vertical_margin,
+        right: monitor.right - horizontal_margin,
+        bottom: monitor.bottom - vertical_margin,
+    }
+}
+
+fn physical_coordinate(value: i64) -> i32 {
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn recover_window_placement(placement: WindowPlacement, monitor: MonitorBounds) -> WindowPlacement {
+    let target = recovery_bounds(monitor);
+    let available_width = (target.right - target.left).max(1);
+    let available_height = (target.bottom - target.top).max(1);
+    let width = placement.width.min(available_width as u32);
+    let height = placement.height.min(available_height as u32);
+    let x = target.left + (available_width - i64::from(width)) / 2;
+    let y = target.top + (available_height - i64::from(height)) / 2;
+    WindowPlacement {
+        x: physical_coordinate(x),
+        y: physical_coordinate(y),
+        width,
+        height,
+        maximized: placement.maximized,
+    }
+}
+
 fn clear_pending_close_request<R: Runtime>(app: &AppHandle<R>) {
     if app.state::<AppState>().clear_close_request().is_err() {
         eprintln!("[remote-terminal] clear close request: NATIVE_STATE_FAILED");
@@ -462,6 +539,38 @@ mod tests {
             placement(0, 1080, 500, 500),
             primary
         ));
+    }
+
+    #[test]
+    fn disconnected_monitor_window_is_centered_and_fitted_on_primary() {
+        let recovered =
+            recover_window_placement(placement(2565, 0, 2582, 1445), monitor(0, 0, 2048, 1280));
+        assert_eq!(
+            recovered,
+            WindowPlacement {
+                x: 32,
+                y: 32,
+                width: 1984,
+                height: 1216,
+                maximized: false,
+            }
+        );
+    }
+
+    #[test]
+    fn disconnected_monitor_window_keeps_usable_size_when_centered() {
+        let recovered =
+            recover_window_placement(placement(2400, 100, 1440, 900), monitor(0, 0, 2048, 1280));
+        assert_eq!(
+            recovered,
+            WindowPlacement {
+                x: 304,
+                y: 190,
+                width: 1440,
+                height: 900,
+                maximized: false,
+            }
+        );
     }
 
     #[test]

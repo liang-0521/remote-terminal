@@ -21,6 +21,7 @@ function createTauriApi(overrides = {}) {
         "command_history_record",
         "command_history_remove",
       ].includes(command)) return [];
+      if (command === "get_ui_preferences") return { uiScale: 1 };
       return { command, args };
     },
     async listen(eventName, handler) {
@@ -38,6 +39,9 @@ function createTauriApi(overrides = {}) {
         calls.push({ type: "drag-unlisten" });
         delete api.dragHandler;
       };
+    },
+    async setWebviewZoom(scaleFactor) {
+      calls.push({ type: "webview-zoom", scaleFactor });
     },
     async openDialog() { return null; },
     async readText() { return "clipboard"; },
@@ -314,6 +318,10 @@ test("Tauri 关闭策略保持持久化命令和关闭请求事件契约", async
     { type: "invoke", command: "set_ui_preferences", args: { preferences } },
     { type: "invoke", command: "resolve_close_request", args: { requestId, action: "background" } },
   ]);
+  assert.deepEqual(api.calls.filter((item) => item.type === "webview-zoom"), [
+    { type: "webview-zoom", scaleFactor: 1 },
+    { type: "webview-zoom", scaleFactor: 1.1 },
+  ]);
   unsubscribe();
 });
 
@@ -426,6 +434,7 @@ test("Tauri WebView 权限不允许直接安装更新或重启进程", async () 
 
   assert.equal(capability.permissions.includes("updater:allow-check"), true);
   assert.equal(capability.permissions.includes("updater:allow-download"), true);
+  assert.equal(capability.permissions.includes("core:webview:allow-set-webview-zoom"), true);
   assert.equal(capability.permissions.includes("updater:allow-install"), false);
   assert.equal(capability.permissions.includes("process:allow-restart"), false);
 });

@@ -1273,10 +1273,6 @@ export function NativeApp() {
       style={{
         "--accent": appearance.accent,
         "--accent-contrast": accentContrast(appearance.accent),
-        width: `${100 / uiScale}%`,
-        height: `${100 / uiScale}%`,
-        transform: `scale(${uiScale})`,
-        transformOrigin: "top left",
       }}
     >
       <main className={`app-shell ${railExpanded ? "is-rail-expanded" : ""}`} style={{ "--task-panel-h": `${taskPanelHeight}px` }}>

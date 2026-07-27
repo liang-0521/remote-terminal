@@ -536,17 +536,25 @@ button.remote-directory-tree__toggle,
 
 .native-workspace-grid > .native-terminal-slot.is-primary,
 .native-workspace-grid > .remote-text-editor.is-primary {
-  display: block;
   grid-column: 1;
   grid-row: 1 / -1;
 }
 
 .native-workspace-grid > .native-terminal-slot.is-secondary,
 .native-workspace-grid > .remote-text-editor.is-secondary {
-  display: block;
   grid-column: 2;
   grid-row: 2;
   border-left: 1px solid var(--border-strong);
+}
+
+.native-workspace-grid > .native-terminal-slot.is-primary,
+.native-workspace-grid > .native-terminal-slot.is-secondary {
+  display: block;
+}
+
+.native-workspace-grid > .remote-text-editor.is-primary,
+.native-workspace-grid > .remote-text-editor.is-secondary {
+  display: grid;
 }
 
 .native-workspace-split__header {

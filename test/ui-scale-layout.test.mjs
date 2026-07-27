@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("界面缩放固定在左上角并保持可视画布填满窗口", async () => {
+test("界面缩放不再使用会破坏终端鼠标坐标的 CSS 变换", async () => {
   const source = await readFile(new URL("../src/NativeApp.jsx", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /\bzoom:\s*uiScale\b/);
-  assert.match(source, /width:\s*`\$\{100\s*\/\s*uiScale\}%`/);
-  assert.match(source, /height:\s*`\$\{100\s*\/\s*uiScale\}%`/);
-  assert.match(source, /transform:\s*`scale\(\$\{uiScale\}\)`/);
-  assert.match(source, /transformOrigin:\s*"top left"/);
+  assert.doesNotMatch(source, /width:\s*`\$\{100\s*\/\s*uiScale\}%`/);
+  assert.doesNotMatch(source, /height:\s*`\$\{100\s*\/\s*uiScale\}%`/);
+  assert.doesNotMatch(source, /transform:\s*`scale\(\$\{uiScale\}\)`/);
 });
 
 test("固定定位弹窗按缩放后的逻辑画布限宽限高", async () => {
@@ -20,11 +19,13 @@ test("固定定位弹窗按缩放后的逻辑画布限宽限高", async () => {
   assert.doesNotMatch(source, /\.(?:connection-manager|settings-panel)\s*\{[^}]*(?:100vw|100vh)/s);
 });
 
-test("所有可选比例的反向画布尺寸在缩放后都等于完整视口", () => {
-  for (const scale of [0.8, 0.9, 1, 1.1, 1.25, 1.5]) {
-    const layoutPercent = 100 / scale;
-    assert.ok(Math.abs(layoutPercent * scale - 100) < Number.EPSILON * 100);
-  }
+test("远程文本编辑器在主工作区和并排工作区都保持网格布局", async () => {
+  const source = await readFile(new URL("../src/feature-styles.css", import.meta.url), "utf8");
+
+  assert.match(
+    source,
+    /\.native-workspace-grid\s*>\s*\.remote-text-editor\.is-primary,\s*\.native-workspace-grid\s*>\s*\.remote-text-editor\.is-secondary\s*\{\s*display:\s*grid;/s,
+  );
 });
 
 test("底部面板拖动统一使用逻辑高度并换算缩放后的指针位移", async () => {
