@@ -1,6 +1,7 @@
 import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { AppErrorBoundary } from "./components/shared/AppErrorBoundary.js";
+import { parseDetachedDocumentLocation } from "./services/detached-document.js";
 import "./styles.css";
 
 // WebView2 is application chrome: browser reload shortcuts can discard live
@@ -12,13 +13,20 @@ document.addEventListener("keydown", (event) => {
   if (reloadShortcut) event.preventDefault();
 }, { capture: true });
 
-const RuntimeApp = lazy(() => import("./App.jsx")
-  .then(({ App }) => ({ default: App })));
+const detachedDocumentLocation = parseDetachedDocumentLocation(window.location.search);
+const RuntimeApp = detachedDocumentLocation.requested
+  ? lazy(() => import("./DetachedDocumentApp.jsx")
+    .then(({ DetachedDocumentApp }) => ({ default: DetachedDocumentApp })))
+  : lazy(() => import("./App.jsx")
+    .then(({ App }) => ({ default: App })));
 
 const application = (
   <AppErrorBoundary>
     <Suspense fallback={<main className="native-startup-state" role="status">正在加载客户端…</main>}>
-      <RuntimeApp />
+      <RuntimeApp
+        document={detachedDocumentLocation.document}
+        parseError={detachedDocumentLocation.error || ""}
+      />
     </Suspense>
   </AppErrorBoundary>
 );

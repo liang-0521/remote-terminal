@@ -464,52 +464,20 @@
   background: var(--surface-warning-soft);
 }
 
-.settings-update,
-.settings-close-behavior > label,
 .credential-save-option {
   border-color: var(--border-default);
-  background: var(--surface-update);
+  background: var(--surface-credential);
 }
 
-.settings-close-behavior > label:has(input:checked) {
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface-update));
-}
-
-.settings-close-behavior > legend,
-.settings-update__version,
-.settings-update__details small,
-.settings-close-behavior small,
 .credential-save-option small,
 .native-credential-help,
 .connection-manager__credential {
   color: var(--text-muted);
 }
 
-.settings-close-behavior strong,
-.settings-update__version strong,
-.settings-update__status,
 .credential-save-option > label,
 .native-credential-option {
   color: var(--text-primary);
-}
-
-.settings-update__action {
-  color: var(--accent-soft-foreground);
-  background: color-mix(in srgb, var(--accent) 17%, var(--surface-update-strong));
-}
-
-.settings-update__action:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 27%, var(--surface-update-strong));
-}
-
-.settings-update__action:disabled {
-  border-color: var(--border-default);
-  color: var(--text-muted);
-  background: var(--surface-update-disabled);
-}
-
-.credential-save-option {
-  background: var(--surface-credential);
 }
 
 .app-root[data-color-scheme="light"] .terminal-surface:not(.native-terminal-surface),

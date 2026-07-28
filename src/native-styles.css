@@ -83,6 +83,10 @@
   height: 100%;
 }
 
+.native-xterm .xterm-screen {
+  position: relative;
+}
+
 .native-xterm .xterm-viewport {
   overflow-x: hidden !important;
   background-color: var(--terminal-background, var(--bg-terminal)) !important;

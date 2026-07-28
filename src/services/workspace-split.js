@@ -7,6 +7,10 @@ export function reconcileSecondaryTabKey(secondaryTabKey, tabKeys, activeTabKey)
   return tabKeys.includes(secondaryTabKey) ? secondaryTabKey : null;
 }
 
+export function visibleWorkspaceTabKeys(tabKeys, secondaryTabKey) {
+  return tabKeys.filter((tabKey) => tabKey !== secondaryTabKey);
+}
+
 export function resolveWorkspaceSplit(tabKey, tabKeys, activeTabKey) {
   if (!tabKey || !tabKeys.includes(tabKey) || tabKeys.length < 2) return null;
   if (tabKey !== activeTabKey) {

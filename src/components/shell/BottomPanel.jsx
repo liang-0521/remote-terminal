@@ -6,29 +6,49 @@ import {
   FileText,
 } from "@phosphor-icons/react";
 import { IconButton } from "../shared/IconButton.jsx";
+import {
+  calculateBottomPanelMaxHeight,
+  clampBottomPanelHeight,
+  MIN_BOTTOM_PANEL_HEIGHT,
+} from "../../services/bottom-panel-layout.js";
 
-const MIN_PANEL_HEIGHT = 120;
-const MAX_PANEL_HEIGHT_RATIO = 0.45;
-
-export function BottomPanel({ collapsed, activeView = "transfer", filesContent = null, transfers, servers, onViewChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
+export function BottomPanel({ collapsed, height, activeView = "transfer", filesContent = null, transfers, servers, onViewChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
   const dragState = useRef(null);
   const panelRef = useRef(null);
-  const [panelHeight, setPanelHeight] = useState(MIN_PANEL_HEIGHT);
-  const maxPanelHeight = Math.max(MIN_PANEL_HEIGHT, Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO));
-  const announcedPanelHeight = Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight));
+  const [panelHeight, setPanelHeight] = useState(MIN_BOTTOM_PANEL_HEIGHT);
+  const [maxPanelHeight, setMaxPanelHeight] = useState(null);
+  const effectiveMaxPanelHeight = maxPanelHeight ?? Math.max(MIN_BOTTOM_PANEL_HEIGHT, height);
+  const announcedPanelHeight = clampBottomPanelHeight(panelHeight, effectiveMaxPanelHeight);
 
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return undefined;
-    const updateHeight = () => {
+    const workbench = panel.closest(".workbench");
+    const terminalTabs = workbench?.querySelector(".terminal-pane > .native-workspace-tab-row");
+    const statusBar = workbench?.querySelector(".status-bar");
+    const updateMeasurements = () => {
       const nextHeight = panel.offsetHeight;
       setPanelHeight((current) => current === nextHeight ? current : nextHeight);
+      const nextMaxHeight = calculateBottomPanelMaxHeight({
+        workbenchHeight: workbench?.clientHeight,
+        terminalTabsHeight: terminalTabs?.offsetHeight || 0,
+        statusBarHeight: statusBar?.offsetHeight || 0,
+      });
+      setMaxPanelHeight((current) => current === nextMaxHeight ? current : nextMaxHeight);
     };
-    const observer = new ResizeObserver(updateHeight);
+    const observer = new ResizeObserver(updateMeasurements);
     observer.observe(panel);
-    updateHeight();
+    if (workbench) observer.observe(workbench);
+    if (terminalTabs) observer.observe(terminalTabs);
+    if (statusBar) observer.observe(statusBar);
+    updateMeasurements();
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (collapsed || maxPanelHeight === null || height <= maxPanelHeight) return;
+    onResize(clampBottomPanelHeight(height, maxPanelHeight));
+  }, [collapsed, height, maxPanelHeight, onResize]);
 
   function startResize(event) {
     if (collapsed) return;
@@ -47,7 +67,7 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
     if (!dragState.current) return;
     const pointerDelta = (dragState.current.startY - event.clientY) / dragState.current.scaleY;
     const nextHeight = dragState.current.startHeight + pointerDelta;
-    onResize(Math.round(Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, nextHeight))));
+    onResize(clampBottomPanelHeight(nextHeight, effectiveMaxPanelHeight));
   }
 
   function endResize(event) {
@@ -60,18 +80,22 @@ export function BottomPanel({ collapsed, activeView = "transfer", filesContent =
     event.preventDefault();
     const panelHeight = event.currentTarget.closest(".bottom-panel").offsetHeight;
     const delta = event.key === "ArrowUp" ? 16 : -16;
-    onResize(Math.round(Math.min(maxPanelHeight, Math.max(MIN_PANEL_HEIGHT, panelHeight + delta))));
+    onResize(clampBottomPanelHeight(panelHeight + delta, effectiveMaxPanelHeight));
   }
 
   return (
-    <section ref={panelRef} className={`bottom-panel ${collapsed ? "is-collapsed" : ""}`}>
+    <section
+      ref={panelRef}
+      className={`bottom-panel ${collapsed ? "is-collapsed" : ""}`}
+      style={collapsed ? undefined : { height: `${height}px` }}
+    >
       {!collapsed && <div
         className="bottom-panel__resize-handle"
         role="separator"
         aria-label="调整底部面板高度"
         aria-orientation="horizontal"
-        aria-valuemin={MIN_PANEL_HEIGHT}
-        aria-valuemax={maxPanelHeight}
+        aria-valuemin={MIN_BOTTOM_PANEL_HEIGHT}
+        aria-valuemax={effectiveMaxPanelHeight}
         aria-valuenow={announcedPanelHeight}
         aria-valuetext={`${announcedPanelHeight} 像素`}
         tabIndex={0}

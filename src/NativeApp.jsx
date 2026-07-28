@@ -15,6 +15,8 @@ import { StatusBar } from "./components/shell/StatusBar.jsx";
 import { TopBar } from "./components/shell/TopBar.jsx";
 import { DEFAULT_EXPLORER_WIDTH, WorkspaceResizeHandle } from "./components/shell/WorkspaceResizeHandle.jsx";
 import { getNativeClient } from "./native/client.js";
+import { openDetachedDocumentWindow } from "./native/detached-document-window.js";
+import { accentContrast, DEFAULT_APPEARANCE } from "./services/appearance.js";
 import { resolveInterfaceColorScheme } from "./services/interface-theme.js";
 import {
   mergeDownloadProgressTransfer,
@@ -39,24 +41,6 @@ const NativeTerminalPane = lazy(() => import("./components/terminal/NativeTermin
 
 const DEFAULT_BOTTOM_PANEL_HEIGHT = 344;
 const ACTIVE_TRANSFER_STATES = new Set(["queued", "uploading", "downloading", "cancelling", "finalizing"]);
-const DEFAULT_APPEARANCE = {
-  accent: "#9d84f8",
-  terminalBackground: "#061423",
-  terminalForeground: "#c8cbd1",
-  terminalFontSize: 14,
-  wallpaperOpacity: 0.22,
-  wallpaperName: "",
-  wallpaperUrl: "",
-};
-
-function accentContrast(hexColor) {
-  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hexColor || "");
-  if (!match) return "#ffffff";
-  const [red, green, blue] = match.slice(1).map((channel) => Number.parseInt(channel, 16));
-  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
-  return luminance > 0.62 ? "#111827" : "#ffffff";
-}
-
 function createWorkspace(connectionId) {
   return {
     connectionId,
@@ -1192,6 +1176,42 @@ export function NativeApp() {
     }
   }
 
+  async function detachRemoteDocument(key) {
+    const document = openDocumentsRef.current.find((item) => item.key === key);
+    if (!document) return;
+    if (document.dirty) {
+      addIssue(
+        document.connectionId,
+        "文件尚未保存",
+        "请先保存当前修改，再把文件标签拖出为独立窗口。",
+        "DETACH_DOCUMENT_DIRTY",
+      );
+      return;
+    }
+    try {
+      await openDetachedDocumentWindow(document);
+    } catch (error) {
+      addIssue(
+        document.connectionId,
+        "无法创建独立文件窗口",
+        error?.message || "文件标签未能拖出主窗口。",
+        error?.code || "DETACHED_WINDOW_CREATE_FAILED",
+      );
+      return;
+    }
+
+    const currentDocuments = openDocumentsRef.current;
+    const index = currentDocuments.findIndex((item) => item.key === key);
+    const next = currentDocuments.filter((item) => item.key !== key);
+    setOpenDocuments(next);
+    setActiveDocumentKey((current) => {
+      if (current !== key) return current;
+      const nextActive = next[index] || next[index - 1] || null;
+      if (nextActive) setActiveConnectionId(nextActive.connectionId);
+      return nextActive?.key || null;
+    });
+  }
+
   function updateRemoteDocumentDirty(key, dirty) {
     setOpenDocuments((current) => current.map((document) => (
       document.key === key && document.dirty !== dirty ? { ...document, dirty } : document
@@ -1331,6 +1351,7 @@ export function NativeApp() {
                 onSessionClose={(connectionId) => void closeWorkspace(connectionId)}
                 onDocumentSelect={selectRemoteDocument}
                 onDocumentClose={(key) => void closeRemoteDocument(key)}
+                onDocumentDetach={(key) => void detachRemoteDocument(key)}
                 onReconnect={reconnectWorkspace}
                 onTerminalError={onTerminalError}
               >
@@ -1363,6 +1384,7 @@ export function NativeApp() {
           )}
           {bottomVisible && activeServer && <BottomPanel
             collapsed={bottomCollapsed}
+            height={bottomPanelHeight}
             activeView={activeBottomView}
             filesContent={bottomFilesAvailable ? <ExplorerPanel {...explorerPanelProps} mode="files" layout="bottom" embedded /> : null}
             transfers={activeWorkspace?.transfers || []}

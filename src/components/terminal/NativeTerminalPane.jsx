@@ -36,8 +36,11 @@ import {
 import {
   reconcileSecondaryTabKey,
   resolveWorkspaceSplit,
+  visibleWorkspaceTabKeys,
   workspaceTabKey,
 } from "../../services/workspace-split.js";
+import { shouldDetachDocumentTab } from "../../services/detached-document.js";
+import { calculateTerminalBottomOffsetRows } from "../../services/terminal-bottom-alignment.js";
 import { IconButton } from "../shared/IconButton.jsx";
 import { TerminalContextMenu } from "./TerminalContextMenu.jsx";
 
@@ -56,12 +59,14 @@ export function NativeTerminalPane({
   onSessionClose,
   onDocumentSelect,
   onDocumentClose,
+  onDocumentDetach,
   onReconnect,
   onTerminalError,
   children,
 }) {
   const tabRefs = useRef(new Map());
   const keyboardTabTargetRef = useRef(null);
+  const internalDropRef = useRef(false);
   const [secondaryTabKey, setSecondaryTabKey] = useState(null);
   const [draggedTabKey, setDraggedTabKey] = useState(null);
   const workspaceTabs = useMemo(() => [
@@ -73,6 +78,14 @@ export function NativeTerminalPane({
     : workspaceTabKey("session", activeSessionId);
   const workspaceTabKeys = useMemo(() => workspaceTabs.map((tab) => tab.key), [workspaceTabs]);
   const secondaryTab = workspaceTabs.find((tab) => tab.key === secondaryTabKey) || null;
+  const topTabKeys = useMemo(
+    () => visibleWorkspaceTabKeys(workspaceTabKeys, secondaryTabKey),
+    [secondaryTabKey, workspaceTabKeys],
+  );
+  const topTabs = useMemo(
+    () => topTabKeys.map((tabKey) => workspaceTabs.find((tab) => tab.key === tabKey)).filter(Boolean),
+    [topTabKeys, workspaceTabs],
+  );
 
   useEffect(() => {
     setSecondaryTabKey((current) => reconcileSecondaryTabKey(current, workspaceTabKeys, activeTabKey));
@@ -93,7 +106,9 @@ export function NativeTerminalPane({
   }, [activeTabKey, workspaceTabs]);
 
   function activateTab(tab) {
-    if (tab.key === secondaryTabKey) setSecondaryTabKey(null);
+    if (tab.key === secondaryTabKey) {
+      setSecondaryTabKey(activeTabKey && activeTabKey !== tab.key ? activeTabKey : null);
+    }
     if (tab.type === "session") {
       onDocumentSelect?.(null);
       onSessionSelect(tab.value.id);
@@ -119,14 +134,51 @@ export function NativeTerminalPane({
     }
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-remote-terminal-tab", tabKey);
+    internalDropRef.current = false;
     setDraggedTabKey(tabKey);
+  }
+
+  function handleTabDragEnd(event, tab) {
+    const dropHandled = internalDropRef.current;
+    internalDropRef.current = false;
+    setDraggedTabKey(null);
+    if (!shouldDetachDocumentTab({
+      tab,
+      dropHandled,
+      pointer: {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        dropEffect: event.dataTransfer?.dropEffect || "none",
+      },
+      viewport: {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        outerWidth: window.outerWidth,
+        outerHeight: window.outerHeight,
+        screenX: window.screenX,
+        screenY: window.screenY,
+      },
+    })) return;
+    void onDocumentDetach?.(tab.value.key);
   }
 
   function dropWorkspaceTab(event) {
     event.preventDefault();
+    internalDropRef.current = true;
     const tabKey = event.dataTransfer.getData("application/x-remote-terminal-tab") || draggedTabKey;
     setDraggedTabKey(null);
     splitWorkspaceTab(tabKey);
+  }
+
+  function restoreWorkspaceTab(event) {
+    if (!draggedTabKey || draggedTabKey !== secondaryTabKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    internalDropRef.current = true;
+    setDraggedTabKey(null);
+    setSecondaryTabKey(null);
   }
 
   function selectRelativeTab(event, currentIndex) {
@@ -135,9 +187,9 @@ export function NativeTerminalPane({
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
-        ? workspaceTabs.length - 1
-        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + workspaceTabs.length) % workspaceTabs.length;
-    const nextTab = workspaceTabs[nextIndex];
+        ? topTabs.length - 1
+        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + topTabs.length) % topTabs.length;
+    const nextTab = topTabs[nextIndex];
     if (!nextTab) return;
     keyboardTabTargetRef.current = nextTab.key;
     activateTab(nextTab);
@@ -163,63 +215,127 @@ export function NativeTerminalPane({
       }}
       onKeyDownCapture={selectNextWorkspaceTab}
     >
-      <div className="terminal-tabs" role="tablist" aria-label="终端和远程文件工作区">
-        {workspaceTabs.map((tab, index) => {
-          const selected = activeTabKey === tab.key;
-          const splitVisible = secondaryTabKey === tab.key;
-          const isSession = tab.type === "session";
-          const item = tab.value;
-          const tabId = isSession ? `terminal-tab-${item.id}` : `document-tab-${item.key}`;
-          const panelId = isSession ? `terminal-panel-${item.id}` : `document-panel-${item.key}`;
-          const TabIcon = isSession ? TerminalIcon : FileText;
-          return (
+      <div className={`native-workspace-tab-row ${secondaryTab ? "is-split" : ""}`}>
+        <div
+          className="terminal-tabs native-workspace-tab-row__primary"
+          role="tablist"
+          aria-label="终端和远程文件工作区"
+          onDragOver={(event) => {
+            if (draggedTabKey !== secondaryTabKey) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          }}
+          onDrop={restoreWorkspaceTab}
+        >
+          {topTabs.map((tab, index) => {
+            const selected = activeTabKey === tab.key;
+            const isSession = tab.type === "session";
+            const item = tab.value;
+            const tabId = isSession ? `terminal-tab-${item.id}` : `document-tab-${item.key}`;
+            const panelId = isSession ? `terminal-panel-${item.id}` : `document-panel-${item.key}`;
+            const TabIcon = isSession ? TerminalIcon : FileText;
+            return (
+              <div
+                key={tab.key}
+                className={`terminal-tab ${isSession ? "" : "is-document"} ${selected ? "is-active" : ""}`}
+                draggable={workspaceTabs.length > 1}
+                onDragStart={(event) => handleTabDragStart(event, tab.key)}
+                onDragEnd={(event) => handleTabDragEnd(event, tab)}
+              >
+                <button
+                  ref={(element) => {
+                    if (element) tabRefs.current.set(tab.key, element);
+                    else tabRefs.current.delete(tab.key);
+                  }}
+                  id={tabId}
+                  type="button"
+                  role="tab"
+                  className="terminal-tab__select"
+                  aria-selected={selected}
+                  aria-controls={panelId}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => activateTab(tab)}
+                  onKeyDown={(event) => selectRelativeTab(event, index)}
+                >
+                  <TabIcon size={18} />
+                  <span>{item.label || item.name}{item.dirty ? " •" : ""}</span>
+                  {isSession && <i className={`status-dot status-dot--${item.state}`} aria-hidden="true" />}
+                </button>
+                <button
+                  type="button"
+                  className="terminal-tab__split"
+                  aria-label={`在右侧并排打开 ${item.label || item.name}`}
+                  disabled={workspaceTabs.length < 2}
+                  onClick={() => splitWorkspaceTab(tab.key)}
+                >
+                  <Columns size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="terminal-tab__close"
+                  aria-label={`关闭 ${item.label || item.name}`}
+                  onClick={() => isSession ? onSessionClose(item.id) : onDocumentClose?.(item.key)}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            );
+          })}
+          <IconButton label="新增服务器工作区" onClick={onSessionAdd}><Plus size={21} /></IconButton>
+        </div>
+
+        {secondaryTab && (
+          <div className="terminal-tabs native-workspace-split__header" role="tablist" aria-label="右侧并排工作区">
             <div
-              key={tab.key}
-              className={`terminal-tab ${isSession ? "" : "is-document"} ${selected ? "is-active" : ""} ${splitVisible ? "is-split" : ""}`}
-              draggable={workspaceTabs.length > 1}
-              onDragStart={(event) => handleTabDragStart(event, tab.key)}
-              onDragEnd={() => setDraggedTabKey(null)}
+              className={`terminal-tab is-active is-split ${secondaryTab.type === "session" ? "" : "is-document"}`}
+              draggable
+              onDragStart={(event) => handleTabDragStart(event, secondaryTab.key)}
+              onDragEnd={(event) => handleTabDragEnd(event, secondaryTab)}
             >
               <button
                 ref={(element) => {
-                  if (element) tabRefs.current.set(tab.key, element);
-                  else tabRefs.current.delete(tab.key);
+                  if (element) tabRefs.current.set(secondaryTab.key, element);
+                  else tabRefs.current.delete(secondaryTab.key);
                 }}
-                id={tabId}
+                id={secondaryTab.type === "session"
+                  ? `terminal-tab-${secondaryTab.value.id}`
+                  : `document-tab-${secondaryTab.value.key}`}
                 type="button"
                 role="tab"
                 className="terminal-tab__select"
-                aria-selected={selected}
-                aria-controls={panelId}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => activateTab(tab)}
-                onKeyDown={(event) => selectRelativeTab(event, index)}
+                aria-selected="true"
+                aria-controls={secondaryTab.type === "session"
+                  ? `terminal-panel-${secondaryTab.value.id}`
+                  : `document-panel-${secondaryTab.value.key}`}
+                onClick={() => activateTab(secondaryTab)}
               >
-                <TabIcon size={18} />
-                <span>{item.label || item.name}{item.dirty ? " •" : ""}</span>
-                {isSession && <i className={`status-dot status-dot--${item.state}`} aria-hidden="true" />}
+                {secondaryTab.type === "session" ? <TerminalIcon size={18} /> : <FileText size={18} />}
+                <span>{secondaryTab.value.label || secondaryTab.value.name}{secondaryTab.value.dirty ? " •" : ""}</span>
+                {secondaryTab.type === "session" && (
+                  <i className={`status-dot status-dot--${secondaryTab.value.state}`} aria-hidden="true" />
+                )}
               </button>
               <button
                 type="button"
                 className="terminal-tab__split"
-                aria-label={`在右侧并排打开 ${item.label || item.name}`}
-                disabled={workspaceTabs.length < 2 || splitVisible}
-                onClick={() => splitWorkspaceTab(tab.key)}
+                aria-label={`将 ${secondaryTab.value.label || secondaryTab.value.name} 移回顶部标签栏`}
+                onClick={() => setSecondaryTabKey(null)}
               >
                 <Columns size={15} />
               </button>
               <button
                 type="button"
                 className="terminal-tab__close"
-                aria-label={`关闭 ${item.label || item.name}`}
-                onClick={() => isSession ? onSessionClose(item.id) : onDocumentClose?.(item.key)}
+                aria-label={`关闭 ${secondaryTab.value.label || secondaryTab.value.name}`}
+                onClick={() => secondaryTab.type === "session"
+                  ? onSessionClose(secondaryTab.value.id)
+                  : onDocumentClose?.(secondaryTab.value.key)}
               >
                 <X size={15} />
               </button>
             </div>
-          );
-        })}
-        <IconButton label="新增服务器工作区" onClick={onSessionAdd}><Plus size={21} /></IconButton>
+          </div>
+        )}
       </div>
 
       <div
@@ -231,17 +347,6 @@ export function NativeTerminalPane({
         }}
         onDrop={dropWorkspaceTab}
       >
-        {secondaryTab && (
-          <div className="native-workspace-split__header">
-            <Columns size={15} aria-hidden="true" />
-            <span title={secondaryTab.value.label || secondaryTab.value.name}>
-              {secondaryTab.value.label || secondaryTab.value.name}
-            </span>
-            <button type="button" aria-label="关闭右侧并排视图" onClick={() => setSecondaryTabKey(null)}>
-              <X size={15} />
-            </button>
-          </div>
-        )}
         {draggedTabKey && (
           <div className="native-workspace-split__drop-zone" aria-hidden="true">
             <Columns size={22} />
@@ -774,6 +879,22 @@ function XtermSurface({
     terminal.open(element);
     terminalRef.current = terminal;
     fitRef.current = fit;
+    let bottomAlignmentFrame = 0;
+    const updateBottomAlignment = () => {
+      bottomAlignmentFrame = 0;
+      const screen = element.querySelector(".xterm-screen");
+      if (!screen || terminal.rows <= 0) return;
+      const offsetRows = calculateTerminalBottomOffsetRows(terminal.buffer.active, terminal.rows);
+      const lineHeight = screen.getBoundingClientRect().height / terminal.rows;
+      screen.style.top = `${Math.max(0, offsetRows * lineHeight)}px`;
+      if (inlineCompletionOpenRef.current) updateInlineAnchor();
+    };
+    const scheduleBottomAlignment = () => {
+      if (bottomAlignmentFrame) window.cancelAnimationFrame(bottomAlignmentFrame);
+      bottomAlignmentFrame = window.requestAnimationFrame(updateBottomAlignment);
+    };
+    const writeParsedSubscription = terminal.onWriteParsed(scheduleBottomAlignment);
+    scheduleBottomAlignment();
 
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || isImeCompositionKeyEvent(event)) return true;
@@ -852,23 +973,26 @@ function XtermSurface({
         .catch((error) => onErrorRef.current?.(error, connectionId));
     });
     const resizeSubscription = terminal.onResize(({ cols, rows }) => {
+      scheduleBottomAlignment();
       if (!activeRef.current) return;
       const currentSessionId = sessionIdRef.current;
       if (!currentSessionId || connectionStateRef.current !== "connected") return;
       void client.terminal.resize(currentSessionId, { cols, rows }).catch((error) => onErrorRef.current?.(error, connectionId));
     });
     const scrollSubscription = terminal.onScroll(() => {
-      if (inlineCompletionOpenRef.current) updateInlineAnchor();
+      scheduleBottomAlignment();
     });
     const resizeObserver = new ResizeObserver(() => {
       if (!activeRef.current) return;
       fit.fit();
-      if (inlineCompletionOpenRef.current) updateInlineAnchor();
+      scheduleBottomAlignment();
     });
     resizeObserver.observe(element);
 
     return () => {
       resizeObserver.disconnect();
+      if (bottomAlignmentFrame) window.cancelAnimationFrame(bottomAlignmentFrame);
+      writeParsedSubscription.dispose();
       scrollSubscription.dispose();
       resizeSubscription.dispose();
       inputSubscription.dispose();

@@ -506,6 +506,23 @@ button.remote-directory-tree__toggle,
   overflow-y: hidden;
 }
 
+.native-workspace-tab-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  height: var(--session-tabs-h);
+  overflow: hidden;
+  background: var(--surface-tabs);
+}
+
+.native-workspace-tab-row.is-split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.native-workspace-tab-row > .terminal-tabs {
+  min-width: 0;
+}
+
 .terminal-tab.is-document {
   min-width: 150px;
 }
@@ -523,7 +540,6 @@ button.remote-directory-tree__toggle,
 
 .native-workspace-grid.is-split {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: 32px minmax(0, 1fr);
 }
 
 .native-workspace-grid > .native-terminal-slot,
@@ -537,13 +553,13 @@ button.remote-directory-tree__toggle,
 .native-workspace-grid > .native-terminal-slot.is-primary,
 .native-workspace-grid > .remote-text-editor.is-primary {
   grid-column: 1;
-  grid-row: 1 / -1;
+  grid-row: 1;
 }
 
 .native-workspace-grid > .native-terminal-slot.is-secondary,
 .native-workspace-grid > .remote-text-editor.is-secondary {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 1;
   border-left: 1px solid var(--border-strong);
 }
 
@@ -559,43 +575,31 @@ button.remote-directory-tree__toggle,
 
 .native-workspace-split__header {
   z-index: 3;
-  display: grid;
+  display: flex;
   grid-column: 2;
-  grid-row: 1;
-  grid-template-columns: 20px minmax(0, 1fr) 30px;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-end;
   min-width: 0;
-  padding-left: 10px;
+  padding-left: 12px;
   border-bottom: 1px solid var(--border-default);
   border-left: 1px solid var(--border-strong);
-  color: var(--text-secondary);
   background: var(--surface-tabs);
-  font-size: 12px;
 }
 
-.native-workspace-split__header span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.native-workspace-split__header .terminal-tab {
+  width: min(100%, 280px);
+  max-width: 280px;
 }
 
-.native-workspace-split__header button {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  color: var(--text-muted);
-  background: transparent;
-  cursor: pointer;
+.native-workspace-split__header .terminal-tab__split {
+  opacity: 1;
 }
 
-.native-workspace-split__header button:hover,
-.native-workspace-split__header button:focus-visible {
-  color: var(--text-strong);
-  background: var(--surface-hover);
+.terminal-tab.is-document[draggable="true"] {
+  cursor: grab;
+}
+
+.terminal-tab.is-document[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .native-workspace-split__drop-zone {
@@ -687,6 +691,75 @@ button.remote-directory-tree__toggle,
   overflow: hidden;
   color: var(--terminal-foreground, var(--text-primary));
   background: var(--terminal-background, var(--bg-base));
+}
+
+.detached-document-window {
+  position: relative;
+  display: grid;
+  grid-template-rows: var(--session-tabs-h) minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--terminal-background, var(--bg-base));
+}
+
+.detached-document-window__tabs {
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+  height: var(--session-tabs-h);
+  padding-left: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--surface-tabs);
+}
+
+.detached-document-window__tabs .terminal-tab {
+  width: min(280px, calc(100vw - 24px));
+  min-width: 150px;
+  flex: 0 1 280px;
+}
+
+.detached-document-window > .remote-text-editor {
+  min-height: 0;
+}
+
+.detached-document-window__error {
+  position: absolute;
+  top: calc(var(--session-tabs-h) + 8px);
+  right: 10px;
+  z-index: 20;
+  max-width: min(420px, calc(100vw - 20px));
+  padding: 8px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: 5px;
+  color: var(--danger-text);
+  background: var(--danger-surface);
+  box-shadow: var(--shadow-floating);
+  font-size: 12px;
+}
+
+.detached-document-error {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  width: 100vw;
+  height: 100vh;
+  padding: 32px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  text-align: center;
+}
+
+.detached-document-error svg {
+  color: var(--accent);
+}
+
+.detached-document-error strong {
+  color: var(--text-strong);
+  font-size: 18px;
 }
 
 .remote-text-editor[hidden] {
