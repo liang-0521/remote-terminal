@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   COMMAND_COMPLETIONS,
+  advanceTerminalApplicationInputState,
   advanceTerminalInputState,
   buildCommandCompletionCatalog,
   calculateInlineCompletionPosition,
   collectExecutedTerminalCommands,
+  createTerminalApplicationInputState,
   createTerminalCompletionInput,
   createTerminalInputState,
   createDirectoryCompletions,
+  detectTerminalApplicationCommand,
   isImeCompositionKeyEvent,
   nextCommandCompletionIndex,
   quotePosixShellArgument,
@@ -212,8 +215,47 @@ test("终端当前行跟踪普通输入、中文 IME 提交、Backspace 和可�
 
 test("命令输入只跟踪普通缓冲区，不接管 vi 等全屏程序的备用缓冲区", () => {
   assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }), true);
+  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }, true), false);
   assert.equal(shouldTrackTerminalCommandInput({ type: "alternate" }), false);
   assert.equal(shouldTrackTerminalCommandInput(undefined), false);
+});
+
+test("识别普通缓冲区中的 vi 启动命令并排除仅包含 vi 文本的 Shell 命令", () => {
+  assert.equal(detectTerminalApplicationCommand("vi notes.txt"), "vi");
+  assert.equal(detectTerminalApplicationCommand("/usr/bin/vim /etc/hosts"), "vi");
+  assert.equal(detectTerminalApplicationCommand("sudo -u root nvim notes.txt"), "vi");
+  assert.equal(detectTerminalApplicationCommand("LC_ALL=C env -i busybox vi notes.txt"), "vi");
+  assert.equal(detectTerminalApplicationCommand("echo vi notes.txt"), null);
+  assert.equal(detectTerminalApplicationCommand("grep -R vi ."), null);
+});
+
+test("vi 输入状态保持 i、方向键和文本直通，并只在真实退出键序列后恢复 Shell 跟踪", () => {
+  let state = createTerminalApplicationInputState("vi");
+  let transition = advanceTerminalApplicationInputState(state, "i");
+  assert.equal(transition.state.mode, "insert");
+  assert.equal(transition.exits, false);
+
+  transition = advanceTerminalApplicationInputState(transition.state, "hello:q!\r");
+  assert.equal(transition.state.mode, "insert");
+  assert.equal(transition.exits, false);
+
+  transition = advanceTerminalApplicationInputState(transition.state, "\u001b[A");
+  assert.equal(transition.state.mode, "insert");
+  transition = advanceTerminalApplicationInputState(transition.state, "\u001b");
+  assert.equal(transition.state.mode, "normal");
+
+  transition = advanceTerminalApplicationInputState(transition.state, ":q!\r");
+  assert.equal(transition.exits, true);
+  assert.equal(transition.state.mode, "normal");
+
+  assert.equal(
+    advanceTerminalApplicationInputState(createTerminalApplicationInputState("vi"), "ZZ").exits,
+    true,
+  );
+  assert.equal(
+    advanceTerminalApplicationInputState(createTerminalApplicationInputState("vi"), "ZQ").exits,
+    true,
+  );
 });
 
 test("只从可靠当前行的 Enter 边界提取本机历史，Ctrl+C 和不可靠输入不记录", () => {

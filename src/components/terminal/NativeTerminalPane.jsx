@@ -14,11 +14,14 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   buildCommandCompletionCatalog,
+  advanceTerminalApplicationInputState,
   advanceTerminalInputState,
   calculateInlineCompletionPosition,
   collectExecutedTerminalCommands,
+  createTerminalApplicationInputState,
   createTerminalCompletionInput,
   createTerminalInputState,
+  detectTerminalApplicationCommand,
   isImeCompositionKeyEvent,
   nextCommandCompletionIndex,
   resolveInlineCompletionKeyAction,
@@ -439,6 +442,8 @@ function XtermSurface({
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
   const terminalWriteQueueRef = useRef(Promise.resolve());
+  const terminalApplicationInputRef = useRef(null);
+  const terminalApplicationUsesAlternateBufferRef = useRef(false);
   const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
   const previousActiveRef = useRef(active);
@@ -794,6 +799,11 @@ function XtermSurface({
   }, [closeInlineCompletion, commandAssistanceMode]);
 
   useEffect(() => {
+    terminalApplicationInputRef.current = null;
+    terminalApplicationUsesAlternateBufferRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
     closeTerminalContextMenu(false);
   }, [closeTerminalContextMenu, connectionState, sessionId]);
 
@@ -917,7 +927,10 @@ function XtermSurface({
         pasteIntoTerminal();
         return false;
       }
-      if (!shouldTrackTerminalCommandInput(terminal.buffer.active)) {
+      if (!shouldTrackTerminalCommandInput(
+        terminal.buffer.active,
+        Boolean(terminalApplicationInputRef.current),
+      )) {
         if (inlineCompletionOpenRef.current) closeInlineCompletion();
         return true;
       }
@@ -971,13 +984,37 @@ function XtermSurface({
         }
         return;
       }
-      const tracksCommandInput = shouldTrackTerminalCommandInput(terminal.buffer.active);
+      const applicationInput = terminalApplicationInputRef.current;
+      const applicationTransition = applicationInput
+        ? advanceTerminalApplicationInputState(applicationInput, data)
+        : null;
+      if (applicationTransition) terminalApplicationInputRef.current = applicationTransition.state;
+      const tracksCommandInput = shouldTrackTerminalCommandInput(
+        terminal.buffer.active,
+        Boolean(applicationInput),
+      );
       const executedCommands = tracksCommandInput
         ? collectExecutedTerminalCommands(terminalInputRef.current, data)
         : [];
+      const terminalApplication = executedCommands
+        .map(detectTerminalApplicationCommand)
+        .find(Boolean);
+      if (terminalApplication) {
+        terminalApplicationInputRef.current = createTerminalApplicationInputState(terminalApplication);
+        closeInlineCompletion();
+        closeCommandSearch({ returnFocus: false });
+      }
       if (tracksCommandInput) trackTerminalInput(data);
       void enqueueTerminalWrite(data)
-        .then(() => recordExecutedCommands(executedCommands))
+        .then(() => {
+          if (applicationTransition?.exits && terminal.buffer.active.type === "normal") {
+            terminalApplicationInputRef.current = null;
+            const nextInput = createTerminalInputState();
+            terminalInputRef.current = nextInput;
+            setTerminalInput(nextInput);
+          }
+          recordExecutedCommands(executedCommands);
+        })
         .catch((error) => onErrorRef.current?.(error, connectionId));
     });
     const resizeSubscription = terminal.onResize(({ cols, rows }) => {
@@ -992,7 +1029,13 @@ function XtermSurface({
     });
     const bufferChangeSubscription = terminal.buffer.onBufferChange((buffer) => {
       scheduleBottomAlignment();
-      if (shouldTrackTerminalCommandInput(buffer)) return;
+      if (buffer.type === "alternate") {
+        terminalApplicationUsesAlternateBufferRef.current = true;
+      } else if (terminalApplicationUsesAlternateBufferRef.current) {
+        terminalApplicationUsesAlternateBufferRef.current = false;
+        terminalApplicationInputRef.current = null;
+      }
+      if (shouldTrackTerminalCommandInput(buffer, Boolean(terminalApplicationInputRef.current))) return;
       closeInlineCompletion();
       closeCommandSearch({ returnFocus: false });
       const nextInput = createTerminalInputState();

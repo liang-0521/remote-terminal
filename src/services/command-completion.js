@@ -127,6 +127,16 @@ const SOURCE_DETAILS = Object.freeze({
 
 const INVALID_TERMINAL_TEXT = /[\u0000-\u001f\u007f]/;
 const SAFE_POSIX_ARGUMENT = /^[A-Za-z0-9_@%+=:,./-]+$/;
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const VI_COMMANDS = new Set(["vi", "vim", "nvim", "view", "vimdiff", "nvimdiff", "rvim", "rview"]);
+const COMMAND_WRAPPERS = new Set(["command", "exec", "nohup"]);
+const PRIVILEGE_WRAPPERS = new Set(["sudo", "doas"]);
+const WRAPPER_OPTIONS_WITH_VALUE = new Set([
+  "-a", "-C", "-D", "-g", "-h", "-p", "-r", "-R", "-T", "-u",
+  "--chdir", "--group", "--host", "--prompt", "--role", "--user",
+]);
+const VI_INSERT_KEYS = new Set(["i", "I", "a", "A", "o", "O", "s", "S", "C", "R"]);
+const VI_EXIT_COMMAND = /^(?:q(?:a|all)?!?|wq!?|wqa!?|x!?|xa!?|cq!?)(?:\s|$)/i;
 
 function sourceDetails(source) {
   return SOURCE_DETAILS[source] || { label: "服务器补全", group: "服务器补全", priority: 4 };
@@ -388,9 +398,164 @@ export function createTerminalInputState() {
   return { reliable: true, text: "" };
 }
 
-export function shouldTrackTerminalCommandInput(buffer) {
-  // vi/vim/less/top 等全屏程序使用备用缓冲区，命令辅助不能在其中接管编辑键。
-  return buffer?.type === "normal";
+function splitShellWords(command) {
+  const words = [];
+  let current = "";
+  let quote = "";
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current) words.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (escaped) current += "\\";
+  if (current) words.push(current);
+  return words;
+}
+
+function commandBasename(word) {
+  return String(word || "").replaceAll("\\", "/").split("/").at(-1).toLocaleLowerCase("en-US");
+}
+
+function skipWrapperOptions(words, startIndex) {
+  let index = startIndex;
+  while (index < words.length && words[index].startsWith("-")) {
+    const option = words[index];
+    index += 1;
+    if (!option.includes("=") && WRAPPER_OPTIONS_WITH_VALUE.has(option)) index += 1;
+  }
+  return index;
+}
+
+export function detectTerminalApplicationCommand(command) {
+  if (typeof command !== "string" || !command.trim() || INVALID_TERMINAL_TEXT.test(command)) return null;
+  const words = splitShellWords(command.trim());
+  let index = 0;
+  while (index < words.length && SHELL_ASSIGNMENT.test(words[index])) index += 1;
+
+  for (;;) {
+    const wrapper = commandBasename(words[index]);
+    if (wrapper === "env") {
+      index = skipWrapperOptions(words, index + 1);
+      while (index < words.length && SHELL_ASSIGNMENT.test(words[index])) index += 1;
+      continue;
+    }
+    if (PRIVILEGE_WRAPPERS.has(wrapper) || COMMAND_WRAPPERS.has(wrapper)) {
+      index = skipWrapperOptions(words, index + 1);
+      while (index < words.length && SHELL_ASSIGNMENT.test(words[index])) index += 1;
+      continue;
+    }
+    break;
+  }
+
+  const executable = commandBasename(words[index]);
+  if (executable === "busybox" && commandBasename(words[index + 1]) === "vi") return "vi";
+  return VI_COMMANDS.has(executable) ? "vi" : null;
+}
+
+export function createTerminalApplicationInputState(kind) {
+  if (kind !== "vi") throw new TypeError("不支持的终端全屏程序类型");
+  return { kind, mode: "normal", commandLine: "", normalSequence: "" };
+}
+
+function skipTerminalEscapeSequence(data, escapeIndex) {
+  const marker = data[escapeIndex + 1];
+  if (marker !== "[" && marker !== "O") return escapeIndex;
+  let index = escapeIndex + 2;
+  while (index < data.length && !/[\x40-\x7e]/.test(data[index])) index += 1;
+  return Math.min(index, data.length - 1);
+}
+
+export function advanceTerminalApplicationInputState(state, data) {
+  if (!state || state.kind !== "vi" || !["normal", "insert", "command"].includes(state.mode)) {
+    throw new TypeError("终端全屏程序输入状态无效");
+  }
+  if (typeof data !== "string") throw new TypeError("终端输入数据必须是字符串");
+
+  const next = { ...state };
+  let exits = false;
+  for (let index = 0; index < data.length; index += 1) {
+    const character = data[index];
+    if (character === "\u001b") {
+      const escapeEnd = skipTerminalEscapeSequence(data, index);
+      if (escapeEnd !== index) {
+        index = escapeEnd;
+        continue;
+      }
+      next.mode = "normal";
+      next.commandLine = "";
+      next.normalSequence = "";
+      continue;
+    }
+    if (character === "\u0003") {
+      next.mode = "normal";
+      next.commandLine = "";
+      next.normalSequence = "";
+      continue;
+    }
+    if (next.mode === "insert") continue;
+    if (next.mode === "command") {
+      if (character === "\r" || character === "\n") {
+        exits = VI_EXIT_COMMAND.test(next.commandLine.trim());
+        next.mode = "normal";
+        next.commandLine = "";
+        next.normalSequence = "";
+      } else if (character === "\b" || character === "\u007f") {
+        next.commandLine = Array.from(next.commandLine).slice(0, -1).join("");
+      } else if (character >= " ") {
+        next.commandLine += character;
+      }
+      continue;
+    }
+    if (character === ":") {
+      next.mode = "command";
+      next.commandLine = "";
+      next.normalSequence = "";
+      continue;
+    }
+    if (VI_INSERT_KEYS.has(character)) {
+      next.mode = "insert";
+      next.normalSequence = "";
+      continue;
+    }
+    if (character === "Z") {
+      next.normalSequence += character;
+      if (next.normalSequence === "ZZ") exits = true;
+      continue;
+    }
+    if (character === "Q" && next.normalSequence === "Z") {
+      exits = true;
+      continue;
+    }
+    next.normalSequence = "";
+  }
+  return { state: next, exits };
+}
+
+export function shouldTrackTerminalCommandInput(buffer, terminalApplicationActive = false) {
+  // 不只依赖备用缓冲区：服务器可配置 Vim 直接复用普通缓冲区。
+  return !terminalApplicationActive && buffer?.type === "normal";
 }
 
 function transitionTerminalInputState(state, data, onExecute = undefined) {
