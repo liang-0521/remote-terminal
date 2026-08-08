@@ -22,6 +22,7 @@ import {
   createTerminalCompletionInput,
   createTerminalInputState,
   detectTerminalApplicationCommand,
+  isLikelyViTerminalBuffer,
   isImeCompositionKeyEvent,
   nextCommandCompletionIndex,
   resolveInlineCompletionKeyAction,
@@ -907,6 +908,15 @@ function XtermSurface({
     const writeParsedSubscription = terminal.onWriteParsed(scheduleBottomAlignment);
     scheduleBottomAlignment();
 
+    const ensureVisibleTerminalApplication = () => {
+      if (terminalApplicationInputRef.current) return true;
+      if (!isLikelyViTerminalBuffer(terminal.buffer.active, terminal.rows)) return false;
+      terminalApplicationInputRef.current = createTerminalApplicationInputState("vi");
+      closeInlineCompletion();
+      closeCommandSearch({ returnFocus: false });
+      return true;
+    };
+
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || isImeCompositionKeyEvent(event)) return true;
       const ctrlShortcut = event.ctrlKey && !event.altKey && !event.metaKey;
@@ -927,9 +937,10 @@ function XtermSurface({
         pasteIntoTerminal();
         return false;
       }
+      const terminalApplicationActive = ensureVisibleTerminalApplication();
       if (!shouldTrackTerminalCommandInput(
         terminal.buffer.active,
-        Boolean(terminalApplicationInputRef.current),
+        terminalApplicationActive,
       )) {
         if (inlineCompletionOpenRef.current) closeInlineCompletion();
         return true;
@@ -984,6 +995,7 @@ function XtermSurface({
         }
         return;
       }
+      ensureVisibleTerminalApplication();
       const applicationInput = terminalApplicationInputRef.current;
       const applicationTransition = applicationInput
         ? advanceTerminalApplicationInputState(applicationInput, data)

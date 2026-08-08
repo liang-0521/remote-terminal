@@ -137,6 +137,8 @@ const WRAPPER_OPTIONS_WITH_VALUE = new Set([
 ]);
 const VI_INSERT_KEYS = new Set(["i", "I", "a", "A", "o", "O", "s", "S", "C", "R"]);
 const VI_EXIT_COMMAND = /^(?:q(?:a|all)?!?|wq!?|wqa!?|x!?|xa!?|cq!?)(?:\s|$)/i;
+const VI_FILE_STATUS = /(?:"[^"\r\n]*"|\[No Name\]).*(?:\b\d+L,\s*\d+[BC]\b|\[(?:New|New File)\])/i;
+const VI_POSITION_STATUS = /\b\d+,\d+(?:-\d+)?\s+(?:All|Top|Bot|\d+%)\s*$/i;
 
 function sourceDetails(source) {
   return SOURCE_DETAILS[source] || { label: "服务器补全", group: "服务器补全", priority: 4 };
@@ -472,6 +474,30 @@ export function detectTerminalApplicationCommand(command) {
   const executable = commandBasename(words[index]);
   if (executable === "busybox" && commandBasename(words[index + 1]) === "vi") return "vi";
   return VI_COMMANDS.has(executable) ? "vi" : null;
+}
+
+export function isLikelyViTerminalBuffer(buffer, visibleRows) {
+  if (
+    buffer?.type !== "normal"
+    || typeof buffer.getLine !== "function"
+    || !Number.isInteger(visibleRows)
+    || visibleRows <= 0
+  ) return false;
+
+  const viewportY = Number.isInteger(buffer.viewportY) && buffer.viewportY >= 0
+    ? buffer.viewportY
+    : 0;
+  let tildeLines = 0;
+  let hasStatus = false;
+  for (let row = 0; row < visibleRows; row += 1) {
+    const text = buffer.getLine(viewportY + row)?.translateToString?.(true);
+    if (typeof text !== "string") continue;
+    const trimmed = text.trim();
+    if (trimmed === "~") tildeLines += 1;
+    if (VI_FILE_STATUS.test(text) || VI_POSITION_STATUS.test(text)) hasStatus = true;
+  }
+  const denseEmptyRows = tildeLines >= Math.max(3, Math.floor(visibleRows / 3));
+  return tildeLines >= 3 && (hasStatus || denseEmptyRows);
 }
 
 export function createTerminalApplicationInputState(kind) {

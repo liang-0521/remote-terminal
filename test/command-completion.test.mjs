@@ -12,6 +12,7 @@ import {
   createTerminalInputState,
   createDirectoryCompletions,
   detectTerminalApplicationCommand,
+  isLikelyViTerminalBuffer,
   isImeCompositionKeyEvent,
   nextCommandCompletionIndex,
   quotePosixShellArgument,
@@ -227,6 +228,34 @@ test("识别普通缓冲区中的 vi 启动命令并排除仅包含 vi 文本的
   assert.equal(detectTerminalApplicationCommand("LC_ALL=C env -i busybox vi notes.txt"), "vi");
   assert.equal(detectTerminalApplicationCommand("echo vi notes.txt"), null);
   assert.equal(detectTerminalApplicationCommand("grep -R vi ."), null);
+});
+
+test("命令行跟踪失效时仍从普通缓冲区的 Vim 画面识别终端应用态", () => {
+  const lines = [
+    "",
+    ...Array.from({ length: 18 }, () => "~"),
+    '"b.txt" [noeol] 1L, 3B                                      1,3  All',
+  ];
+  const buffer = {
+    type: "normal",
+    viewportY: 0,
+    getLine(index) {
+      if (index < 0 || index >= lines.length) return undefined;
+      return { translateToString: () => lines[index] };
+    },
+  };
+
+  const pasted = advanceTerminalInputState(
+    createTerminalInputState(),
+    "\u001b[200~vi b.txt\u001b[201~",
+  );
+  assert.equal(pasted.reliable, false);
+  assert.equal(isLikelyViTerminalBuffer(buffer, lines.length), true);
+  assert.equal(isLikelyViTerminalBuffer({ ...buffer, type: "alternate" }, lines.length), false);
+  assert.equal(isLikelyViTerminalBuffer({
+    ...buffer,
+    getLine: () => ({ translateToString: () => "root@test:/opt$ vi b.txt" }),
+  }, lines.length), false);
 });
 
 test("vi 输入状态保持 i、方向键和文本直通，并只在真实退出键序列后恢复 Shell 跟踪", () => {
