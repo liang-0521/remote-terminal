@@ -2,18 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   COMMAND_COMPLETIONS,
-  advanceTerminalApplicationInputState,
   advanceTerminalInputState,
   buildCommandCompletionCatalog,
   calculateInlineCompletionPosition,
   collectExecutedTerminalCommands,
-  createTerminalApplicationInputState,
   createTerminalCompletionInput,
   createTerminalInputState,
   createDirectoryCompletions,
-  detectTerminalApplicationCommand,
-  isLikelyViTerminalBuffer,
   isImeCompositionKeyEvent,
+  isLikelyShellPromptLine,
   nextCommandCompletionIndex,
   quotePosixShellArgument,
   resolveInlineCompletionKeyAction,
@@ -214,77 +211,21 @@ test("终端当前行跟踪普通输入、中文 IME 提交、Backspace 和可�
   assert.deepEqual(advanceTerminalInputState(state, "\u0015"), { reliable: true, text: "" });
 });
 
-test("命令输入只跟踪普通缓冲区，不接管 vi 等全屏程序的备用缓冲区", () => {
-  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }), true);
-  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }, true), false);
+test("命令输入只在已确认 Shell 提示符的普通缓冲区跟踪", () => {
+  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }), false);
+  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }, true), true);
   assert.equal(shouldTrackTerminalCommandInput({ type: "alternate" }), false);
   assert.equal(shouldTrackTerminalCommandInput(undefined), false);
 });
 
-test("识别普通缓冲区中的 vi 启动命令并排除仅包含 vi 文本的 Shell 命令", () => {
-  assert.equal(detectTerminalApplicationCommand("vi notes.txt"), "vi");
-  assert.equal(detectTerminalApplicationCommand("/usr/bin/vim /etc/hosts"), "vi");
-  assert.equal(detectTerminalApplicationCommand("sudo -u root nvim notes.txt"), "vi");
-  assert.equal(detectTerminalApplicationCommand("LC_ALL=C env -i busybox vi notes.txt"), "vi");
-  assert.equal(detectTerminalApplicationCommand("echo vi notes.txt"), null);
-  assert.equal(detectTerminalApplicationCommand("grep -R vi ."), null);
-});
-
-test("命令行跟踪失效时仍从普通缓冲区的 Vim 画面识别终端应用态", () => {
-  const lines = [
-    "",
-    ...Array.from({ length: 18 }, () => "~"),
-    '"b.txt" [noeol] 1L, 3B                                      1,3  All',
-  ];
-  const buffer = {
-    type: "normal",
-    viewportY: 0,
-    getLine(index) {
-      if (index < 0 || index >= lines.length) return undefined;
-      return { translateToString: () => lines[index] };
-    },
-  };
-
-  const pasted = advanceTerminalInputState(
-    createTerminalInputState(),
-    "\u001b[200~vi b.txt\u001b[201~",
-  );
-  assert.equal(pasted.reliable, false);
-  assert.equal(isLikelyViTerminalBuffer(buffer, lines.length), true);
-  assert.equal(isLikelyViTerminalBuffer({ ...buffer, type: "alternate" }, lines.length), false);
-  assert.equal(isLikelyViTerminalBuffer({
-    ...buffer,
-    getLine: () => ({ translateToString: () => "root@test:/opt$ vi b.txt" }),
-  }, lines.length), false);
-});
-
-test("vi 输入状态保持 i、方向键和文本直通，并只在真实退出键序列后恢复 Shell 跟踪", () => {
-  let state = createTerminalApplicationInputState("vi");
-  let transition = advanceTerminalApplicationInputState(state, "i");
-  assert.equal(transition.state.mode, "insert");
-  assert.equal(transition.exits, false);
-
-  transition = advanceTerminalApplicationInputState(transition.state, "hello:q!\r");
-  assert.equal(transition.state.mode, "insert");
-  assert.equal(transition.exits, false);
-
-  transition = advanceTerminalApplicationInputState(transition.state, "\u001b[A");
-  assert.equal(transition.state.mode, "insert");
-  transition = advanceTerminalApplicationInputState(transition.state, "\u001b");
-  assert.equal(transition.state.mode, "normal");
-
-  transition = advanceTerminalApplicationInputState(transition.state, ":q!\r");
-  assert.equal(transition.exits, true);
-  assert.equal(transition.state.mode, "normal");
-
-  assert.equal(
-    advanceTerminalApplicationInputState(createTerminalApplicationInputState("vi"), "ZZ").exits,
-    true,
-  );
-  assert.equal(
-    advanceTerminalApplicationInputState(createTerminalApplicationInputState("vi"), "ZQ").exits,
-    true,
-  );
+test("只用远端已渲染的 Shell 提示符开启命令旁路观察", () => {
+  assert.equal(isLikelyShellPromptLine("root@test:/opt#"), true);
+  assert.equal(isLikelyShellPromptLine("[root@test opt]# "), true);
+  assert.equal(isLikelyShellPromptLine("user@test:~$ "), true);
+  assert.equal(isLikelyShellPromptLine("app % "), true);
+  assert.equal(isLikelyShellPromptLine("vi-fixed-20260808"), false);
+  assert.equal(isLikelyShellPromptLine("~"), false);
+  assert.equal(isLikelyShellPromptLine("bad\n# "), false);
 });
 
 test("只从可靠当前行的 Enter 边界提取本机历史，Ctrl+C 和不可靠输入不记录", () => {

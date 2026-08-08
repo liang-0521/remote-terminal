@@ -352,12 +352,13 @@ function createMemorySftp() {
     });
   }
 
-  function snapshot() {
+  function snapshot(extra = {}) {
     const uploaded = [...files.entries()]
       .filter(([remotePath]) => path.posix.dirname(remotePath) === UPLOAD_DIRECTORY)
       .map(([remotePath, content]) => ({ name: path.posix.basename(remotePath), bytes: content.length }))
       .sort((left, right) => left.name.localeCompare(right.name));
     return {
+      ...extra,
       operations: audit.slice(),
       uploaded,
       temporaryFiles: uploaded.filter((item) => item.name.endsWith(".part")).length,
@@ -372,6 +373,7 @@ export function startSshServer({ enableSftp = false } = {}) {
   const clients = new Set();
   const memorySftp = createMemorySftp();
   let monitorCounterSample = 0;
+  const ptyRequests = [];
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     clients.add(client);
     client.on("error", () => undefined);
@@ -386,7 +388,14 @@ export function startSshServer({ enableSftp = false } = {}) {
     client.on("ready", () => {
       client.on("session", (accept) => {
         const session = accept();
-        session.on("pty", (acceptPty) => acceptPty?.());
+        session.on("pty", (acceptPty, _rejectPty, info) => {
+          ptyRequests.push({
+            term: info.term,
+            cols: info.cols,
+            rows: info.rows,
+          });
+          acceptPty?.();
+        });
         session.on("window-change", (acceptWindowChange) => acceptWindowChange?.());
         session.on("shell", (acceptShell) => {
           const stream = acceptShell();
@@ -397,7 +406,7 @@ export function startSshServer({ enableSftp = false } = {}) {
           const stream = acceptExec();
           let output;
           if (info.command === SFTP_AUDIT_COMMAND) {
-            output = JSON.stringify(memorySftp.snapshot());
+            output = JSON.stringify(memorySftp.snapshot({ ptyRequests: ptyRequests.slice() }));
           } else if (info.command.includes(NETWORK_MARKER)) {
             output = createMonitorCounters(monitorCounterSample);
             monitorCounterSample += 1;

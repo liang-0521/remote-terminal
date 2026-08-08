@@ -14,16 +14,13 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   buildCommandCompletionCatalog,
-  advanceTerminalApplicationInputState,
   advanceTerminalInputState,
   calculateInlineCompletionPosition,
   collectExecutedTerminalCommands,
-  createTerminalApplicationInputState,
   createTerminalCompletionInput,
   createTerminalInputState,
-  detectTerminalApplicationCommand,
-  isLikelyViTerminalBuffer,
   isImeCompositionKeyEvent,
+  isLikelyShellPromptLine,
   nextCommandCompletionIndex,
   resolveInlineCompletionKeyAction,
   searchCommandCompletions,
@@ -443,8 +440,7 @@ function XtermSurface({
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
   const terminalWriteQueueRef = useRef(Promise.resolve());
-  const terminalApplicationInputRef = useRef(null);
-  const terminalApplicationUsesAlternateBufferRef = useRef(false);
+  const shellPromptReadyRef = useRef(false);
   const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
   const previousActiveRef = useRef(active);
@@ -800,8 +796,7 @@ function XtermSurface({
   }, [closeInlineCompletion, commandAssistanceMode]);
 
   useEffect(() => {
-    terminalApplicationInputRef.current = null;
-    terminalApplicationUsesAlternateBufferRef.current = false;
+    shellPromptReadyRef.current = false;
   }, [sessionId]);
 
   useEffect(() => {
@@ -905,17 +900,23 @@ function XtermSurface({
       if (bottomAlignmentFrame) window.cancelAnimationFrame(bottomAlignmentFrame);
       bottomAlignmentFrame = window.requestAnimationFrame(updateBottomAlignment);
     };
-    const writeParsedSubscription = terminal.onWriteParsed(scheduleBottomAlignment);
-    scheduleBottomAlignment();
-
-    const ensureVisibleTerminalApplication = () => {
-      if (terminalApplicationInputRef.current) return true;
-      if (!isLikelyViTerminalBuffer(terminal.buffer.active, terminal.rows)) return false;
-      terminalApplicationInputRef.current = createTerminalApplicationInputState("vi");
-      closeInlineCompletion();
-      closeCommandSearch({ returnFocus: false });
-      return true;
+    const markShellPromptReady = () => {
+      const buffer = terminal.buffer.active;
+      if (buffer.type !== "normal" || shellPromptReadyRef.current) return;
+      const lineIndex = buffer.baseY + buffer.cursorY;
+      const line = buffer.getLine(lineIndex)?.translateToString?.(true);
+      if (!isLikelyShellPromptLine(line)) return;
+      shellPromptReadyRef.current = true;
+      const nextInput = createTerminalInputState();
+      terminalInputRef.current = nextInput;
+      setTerminalInput(nextInput);
     };
+    const handleWriteParsed = () => {
+      scheduleBottomAlignment();
+      markShellPromptReady();
+    };
+    const writeParsedSubscription = terminal.onWriteParsed(handleWriteParsed);
+    scheduleBottomAlignment();
 
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || isImeCompositionKeyEvent(event)) return true;
@@ -937,14 +938,6 @@ function XtermSurface({
         pasteIntoTerminal();
         return false;
       }
-      const terminalApplicationActive = ensureVisibleTerminalApplication();
-      if (!shouldTrackTerminalCommandInput(
-        terminal.buffer.active,
-        terminalApplicationActive,
-      )) {
-        if (inlineCompletionOpenRef.current) closeInlineCompletion();
-        return true;
-      }
       const togglesCompletion = ctrlShortcut && (
         (event.shiftKey && event.code === "KeyP")
         || (!event.shiftKey && event.code === "Space")
@@ -952,6 +945,10 @@ function XtermSurface({
       if (togglesCompletion) {
         toggleCommandSearch();
         return false;
+      }
+      if (!shouldTrackTerminalCommandInput(terminal.buffer.active, shellPromptReadyRef.current)) {
+        if (inlineCompletionOpenRef.current) closeInlineCompletion();
+        return true;
       }
 
       const currentSuggestions = suggestionsRef.current;
@@ -963,7 +960,7 @@ function XtermSurface({
       });
       if (keyAction === "close") {
         closeInlineCompletion();
-        return false;
+        return true;
       }
       if (keyAction === "execute") {
         closeInlineCompletion();
@@ -995,36 +992,20 @@ function XtermSurface({
         }
         return;
       }
-      ensureVisibleTerminalApplication();
-      const applicationInput = terminalApplicationInputRef.current;
-      const applicationTransition = applicationInput
-        ? advanceTerminalApplicationInputState(applicationInput, data)
-        : null;
-      if (applicationTransition) terminalApplicationInputRef.current = applicationTransition.state;
+      const writeRequest = enqueueTerminalWrite(data);
       const tracksCommandInput = shouldTrackTerminalCommandInput(
         terminal.buffer.active,
-        Boolean(applicationInput),
+        shellPromptReadyRef.current,
       );
       const executedCommands = tracksCommandInput
         ? collectExecutedTerminalCommands(terminalInputRef.current, data)
         : [];
-      const terminalApplication = executedCommands
-        .map(detectTerminalApplicationCommand)
-        .find(Boolean);
-      if (terminalApplication) {
-        terminalApplicationInputRef.current = createTerminalApplicationInputState(terminalApplication);
-        closeInlineCompletion();
-        closeCommandSearch({ returnFocus: false });
+      if (tracksCommandInput) {
+        trackTerminalInput(data);
+        if (/[\r\n\u0003]/.test(data)) shellPromptReadyRef.current = false;
       }
-      if (tracksCommandInput) trackTerminalInput(data);
-      void enqueueTerminalWrite(data)
+      void writeRequest
         .then(() => {
-          if (applicationTransition?.exits && terminal.buffer.active.type === "normal") {
-            terminalApplicationInputRef.current = null;
-            const nextInput = createTerminalInputState();
-            terminalInputRef.current = nextInput;
-            setTerminalInput(nextInput);
-          }
           recordExecutedCommands(executedCommands);
         })
         .catch((error) => onErrorRef.current?.(error, connectionId));
@@ -1041,13 +1022,7 @@ function XtermSurface({
     });
     const bufferChangeSubscription = terminal.buffer.onBufferChange((buffer) => {
       scheduleBottomAlignment();
-      if (buffer.type === "alternate") {
-        terminalApplicationUsesAlternateBufferRef.current = true;
-      } else if (terminalApplicationUsesAlternateBufferRef.current) {
-        terminalApplicationUsesAlternateBufferRef.current = false;
-        terminalApplicationInputRef.current = null;
-      }
-      if (shouldTrackTerminalCommandInput(buffer, Boolean(terminalApplicationInputRef.current))) return;
+      shellPromptReadyRef.current = false;
       closeInlineCompletion();
       closeCommandSearch({ returnFocus: false });
       const nextInput = createTerminalInputState();

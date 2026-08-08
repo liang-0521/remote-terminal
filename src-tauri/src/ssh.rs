@@ -4,7 +4,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use russh::{
     client,
     keys::ssh_key::{HashAlg, PublicKey},
-    ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect,
+    ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Pty,
 };
 use russh_sftp::{
     client::{error::Error as SftpError, SftpSession},
@@ -52,6 +52,61 @@ const REMOTE_TEXT_WRITE_LIMIT: usize = 2 * 1024 * 1024;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 const COMMANDS_MARKER: &str = "@@REMOTE_TERMINAL:COMMANDS@@";
+
+// SSH PTY requests do not inherit a local console on Windows. Sending an empty
+// mode list leaves some servers in a non-interactive state where CR is not
+// translated to NL and full-screen programs cannot consume single keystrokes.
+const INTERACTIVE_PTY_MODES: &[(Pty, u32)] = &[
+    (Pty::VINTR, 3),
+    (Pty::VQUIT, 28),
+    (Pty::VERASE, 127),
+    (Pty::VKILL, 21),
+    (Pty::VEOF, 4),
+    (Pty::VSTART, 17),
+    (Pty::VSTOP, 19),
+    (Pty::VSUSP, 26),
+    (Pty::VREPRINT, 18),
+    (Pty::VWERASE, 23),
+    (Pty::VLNEXT, 22),
+    (Pty::VDISCARD, 15),
+    (Pty::IGNPAR, 0),
+    (Pty::PARMRK, 0),
+    (Pty::INPCK, 0),
+    (Pty::ISTRIP, 0),
+    (Pty::INLCR, 0),
+    (Pty::IGNCR, 0),
+    (Pty::ICRNL, 1),
+    (Pty::IUCLC, 0),
+    (Pty::IXON, 1),
+    (Pty::IXANY, 0),
+    (Pty::IXOFF, 0),
+    (Pty::IMAXBEL, 1),
+    (Pty::ISIG, 1),
+    (Pty::ICANON, 1),
+    (Pty::XCASE, 0),
+    (Pty::ECHO, 1),
+    (Pty::ECHOE, 1),
+    (Pty::ECHOK, 1),
+    (Pty::ECHONL, 0),
+    (Pty::NOFLSH, 0),
+    (Pty::TOSTOP, 0),
+    (Pty::IEXTEN, 1),
+    (Pty::ECHOCTL, 1),
+    (Pty::ECHOKE, 1),
+    (Pty::PENDIN, 0),
+    (Pty::OPOST, 1),
+    (Pty::OLCUC, 0),
+    (Pty::ONLCR, 1),
+    (Pty::OCRNL, 0),
+    (Pty::ONOCR, 0),
+    (Pty::ONLRET, 0),
+    (Pty::CS7, 0),
+    (Pty::CS8, 1),
+    (Pty::PARENB, 0),
+    (Pty::PARODD, 0),
+    (Pty::TTY_OP_ISPEED, 38_400),
+    (Pty::TTY_OP_OSPEED, 38_400),
+];
 
 const COMPLETION_CATALOG_COMMAND: &str = r#"export LC_ALL=C
 printf '%s\n' '@@REMOTE_TERMINAL:COMMANDS@@'
@@ -630,7 +685,7 @@ impl SshManager {
                 dimensions.rows,
                 0,
                 0,
-                &[],
+                INTERACTIVE_PTY_MODES,
             )
             .await
             .map_err(|_| AppError::new("PTY_OPEN_FAILED", "SSH 已连接，但服务器拒绝分配 PTY。"))?;
@@ -3728,6 +3783,25 @@ mod tests {
                 .code,
             "INVALID_INPUT"
         );
+    }
+
+    #[test]
+    fn interactive_pty_modes_define_a_usable_shell_baseline() {
+        let value = |mode| {
+            INTERACTIVE_PTY_MODES
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == mode).then_some(*value))
+        };
+
+        assert_eq!(value(Pty::ICRNL), Some(1));
+        assert_eq!(value(Pty::ISIG), Some(1));
+        assert_eq!(value(Pty::ICANON), Some(1));
+        assert_eq!(value(Pty::ECHO), Some(1));
+        assert_eq!(value(Pty::OPOST), Some(1));
+        assert_eq!(value(Pty::ONLCR), Some(1));
+        assert_eq!(value(Pty::VINTR), Some(3));
+        assert_eq!(value(Pty::VEOF), Some(4));
+        assert_eq!(value(Pty::TTY_OP_END), None);
     }
 
     #[test]

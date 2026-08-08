@@ -222,6 +222,15 @@ fn real_ssh_sftp_protocol_smoke() {
         )
         .await;
 
+        let vi_input_start = sink.count();
+        for input in ["i", "\u{1b}", ":", "w", "q", "\r"] {
+            manager
+                .write_terminal(&connected.session_id, input)
+                .await
+                .expect("ordered full-screen terminal input");
+        }
+        wait_for_terminal_bytes(&sink, vi_input_start, &connected.session_id, b"i\x1b:wq\r").await;
+
         let completion = manager
             .completion_catalog(&connected.session_id)
             .await
@@ -448,6 +457,17 @@ fn real_ssh_sftp_protocol_smoke() {
             .await
             .expect("fixture SFTP audit");
         let audit: Value = serde_json::from_str(audit.stdout.trim()).expect("fixture audit JSON");
+        let pty = audit
+            .get("ptyRequests")
+            .and_then(Value::as_array)
+            .and_then(|requests| requests.last())
+            .expect("interactive PTY request audit");
+        assert_eq!(
+            pty.get("term").and_then(Value::as_str),
+            Some("xterm-256color")
+        );
+        assert_eq!(pty.get("cols").and_then(Value::as_u64), Some(100));
+        assert_eq!(pty.get("rows").and_then(Value::as_u64), Some(30));
         let operations = audit
             .get("operations")
             .and_then(Value::as_array)
