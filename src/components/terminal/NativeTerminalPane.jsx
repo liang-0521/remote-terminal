@@ -25,6 +25,7 @@ import {
   searchCommandCompletions,
   searchInlineCommandCompletions,
   shouldAutoOpenCommandCompletion,
+  shouldTrackTerminalCommandInput,
 } from "../../services/command-completion.js";
 import {
   copyTerminalSelection,
@@ -904,14 +905,6 @@ function XtermSurface({
         openTerminalContextMenuAtCursor();
         return false;
       }
-      const togglesCompletion = ctrlShortcut && (
-        (event.shiftKey && event.code === "KeyP")
-        || (!event.shiftKey && event.code === "Space")
-      );
-      if (togglesCompletion) {
-        toggleCommandSearch();
-        return false;
-      }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyC") {
         copySelectedTerminalText(readTerminalSelection(terminal));
         return false;
@@ -922,6 +915,18 @@ function XtermSurface({
       }
       if (ctrlShortcut && event.shiftKey && event.code === "KeyV") {
         pasteIntoTerminal();
+        return false;
+      }
+      if (!shouldTrackTerminalCommandInput(terminal.buffer.active)) {
+        if (inlineCompletionOpenRef.current) closeInlineCompletion();
+        return true;
+      }
+      const togglesCompletion = ctrlShortcut && (
+        (event.shiftKey && event.code === "KeyP")
+        || (!event.shiftKey && event.code === "Space")
+      );
+      if (togglesCompletion) {
+        toggleCommandSearch();
         return false;
       }
 
@@ -966,8 +971,11 @@ function XtermSurface({
         }
         return;
       }
-      const executedCommands = collectExecutedTerminalCommands(terminalInputRef.current, data);
-      trackTerminalInput(data);
+      const tracksCommandInput = shouldTrackTerminalCommandInput(terminal.buffer.active);
+      const executedCommands = tracksCommandInput
+        ? collectExecutedTerminalCommands(terminalInputRef.current, data)
+        : [];
+      if (tracksCommandInput) trackTerminalInput(data);
       void enqueueTerminalWrite(data)
         .then(() => recordExecutedCommands(executedCommands))
         .catch((error) => onErrorRef.current?.(error, connectionId));
@@ -982,6 +990,15 @@ function XtermSurface({
     const scrollSubscription = terminal.onScroll(() => {
       scheduleBottomAlignment();
     });
+    const bufferChangeSubscription = terminal.buffer.onBufferChange((buffer) => {
+      scheduleBottomAlignment();
+      if (shouldTrackTerminalCommandInput(buffer)) return;
+      closeInlineCompletion();
+      closeCommandSearch({ returnFocus: false });
+      const nextInput = createTerminalInputState();
+      terminalInputRef.current = nextInput;
+      setTerminalInput(nextInput);
+    });
     const resizeObserver = new ResizeObserver(() => {
       if (!activeRef.current) return;
       fit.fit();
@@ -993,6 +1010,7 @@ function XtermSurface({
       resizeObserver.disconnect();
       if (bottomAlignmentFrame) window.cancelAnimationFrame(bottomAlignmentFrame);
       writeParsedSubscription.dispose();
+      bufferChangeSubscription.dispose();
       scrollSubscription.dispose();
       resizeSubscription.dispose();
       inputSubscription.dispose();
@@ -1000,7 +1018,7 @@ function XtermSurface({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeInlineCompletion, connectionId, copySelectedTerminalText, enqueueTerminalWrite, insertCompletion, openTerminalContextMenuAtCursor, pasteIntoTerminal, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+  }, [client, closeCommandSearch, closeInlineCompletion, connectionId, copySelectedTerminalText, enqueueTerminalWrite, insertCompletion, openTerminalContextMenuAtCursor, pasteIntoTerminal, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
 
   useEffect(() => {
     const terminal = terminalRef.current;

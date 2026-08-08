@@ -16,6 +16,7 @@ import {
   searchCommandCompletions,
   searchInlineCommandCompletions,
   shouldAutoOpenCommandCompletion,
+  shouldTrackTerminalCommandInput,
 } from "../src/services/command-completion.js";
 
 test("命令补全支持 ll/ls alias、中文描述、关键词和分组", () => {
@@ -207,6 +208,12 @@ test("终端当前行跟踪普通输入、中文 IME 提交、Backspace 和可�
   state = advanceTerminalInputState(state, "件");
   assert.equal(searchCommandCompletions(state.text)[0].command, "ls -lah");
   assert.deepEqual(advanceTerminalInputState(state, "\u0015"), { reliable: true, text: "" });
+});
+
+test("命令输入只跟踪普通缓冲区，不接管 vi 等全屏程序的备用缓冲区", () => {
+  assert.equal(shouldTrackTerminalCommandInput({ type: "normal" }), true);
+  assert.equal(shouldTrackTerminalCommandInput({ type: "alternate" }), false);
+  assert.equal(shouldTrackTerminalCommandInput(undefined), false);
 });
 
 test("只从可靠当前行的 Enter 边界提取本机历史，Ctrl+C 和不可靠输入不记录", () => {

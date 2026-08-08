@@ -388,6 +388,11 @@ export function createTerminalInputState() {
   return { reliable: true, text: "" };
 }
 
+export function shouldTrackTerminalCommandInput(buffer) {
+  // vi/vim/less/top 等全屏程序使用备用缓冲区，命令辅助不能在其中接管编辑键。
+  return buffer?.type === "normal";
+}
+
 function transitionTerminalInputState(state, data, onExecute = undefined) {
   if (!state || typeof state.reliable !== "boolean" || typeof state.text !== "string") {
     throw new TypeError("终端输入状态无效");
