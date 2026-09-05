@@ -118,8 +118,7 @@ test("终端菜单绑定触发会话的选区快照且不破坏 Ctrl+C 中断语
   assert.match(paneSource, /sessionIdRef\.current === targetSessionId/);
   assert.match(paneSource, /activeRef\.current = active/);
   assert.match(paneSource, /previousActiveRef\.current !== active/);
-  assert.match(paneSource, /const queuedSessionId = sessionIdRef\.current/);
-  assert.match(paneSource, /sessionIdRef\.current !== queuedSessionId/);
+  assert.match(paneSource, /getSessionId: \(\) => connectionStateRef\.current === "connected" \? sessionIdRef\.current : null/);
   assert.match(paneSource, /onMouseDownCapture=\{blockRemoteTerminalRightClick\}/);
   assert.match(paneSource, /onContextMenuCapture=\{handleTerminalContextMenu\}/);
   assert.match(paneSource, /ctrlShortcut && !event\.shiftKey && event\.code === "KeyC" && terminal\.hasSelection\(\)/);

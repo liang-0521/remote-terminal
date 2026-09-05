@@ -43,6 +43,7 @@ import {
 } from "../../services/workspace-split.js";
 import { shouldDetachDocumentTab } from "../../services/detached-document.js";
 import { calculateTerminalBottomOffsetRows } from "../../services/terminal-bottom-alignment.js";
+import { createTerminalTransport } from "../../services/terminal-transport.js";
 import { IconButton } from "../shared/IconButton.jsx";
 import { TerminalContextMenu } from "./TerminalContextMenu.jsx";
 
@@ -439,7 +440,6 @@ function XtermSurface({
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
-  const terminalWriteQueueRef = useRef(Promise.resolve());
   const shellPromptReadyRef = useRef(false);
   const historyMutationQueueRef = useRef(Promise.resolve());
   const activeRef = useRef(active);
@@ -520,6 +520,26 @@ function XtermSurface({
   connectionStateRef.current = connectionState;
   reconnectRef.current = onReconnect;
   onErrorRef.current = onError;
+
+  const terminalTransport = useMemo(() => createTerminalTransport({
+    getSessionId: () => connectionStateRef.current === "connected" ? sessionIdRef.current : null,
+    write: (id, data) => client.terminal.write(id, data),
+    resize: (id, dimensions) => client.terminal.resize(id, dimensions),
+  }), [client]);
+
+  const syncTerminalSize = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (!terminal || !activeRef.current) return;
+    if (!sessionIdRef.current || connectionStateRef.current !== "connected") return;
+    void terminalTransport.resize({ cols: terminal.cols, rows: terminal.rows })
+      .catch((error) => onErrorRef.current?.(error, connectionId));
+  }, [connectionId, terminalTransport]);
+
+  const fitTerminal = useCallback(() => {
+    if (!activeRef.current) return;
+    fitRef.current?.fit();
+    syncTerminalSize();
+  }, [syncTerminalSize]);
 
   const focusTerminalIfAppropriate = useCallback(() => {
     const activeElement = document.activeElement;
@@ -701,21 +721,7 @@ function XtermSurface({
     if (nextOpen) window.requestAnimationFrame(updateInlineAnchor);
   }, [closeInlineCompletion, updateInlineAnchor]);
 
-  const enqueueTerminalWrite = useCallback((data) => {
-    const queuedSessionId = sessionIdRef.current;
-    const request = terminalWriteQueueRef.current.then(() => {
-      if (
-        !queuedSessionId
-        || sessionIdRef.current !== queuedSessionId
-        || connectionStateRef.current !== "connected"
-      ) {
-        throw new Error("SSH 会话当前不可写。");
-      }
-      return client.terminal.write(queuedSessionId, data);
-    });
-    terminalWriteQueueRef.current = request.catch(() => undefined);
-    return request;
-  }, [client]);
+  const enqueueTerminalWrite = useCallback((data) => terminalTransport.write(data), [terminalTransport]);
 
   const enqueueHistoryMutation = useCallback((operation) => {
     const request = historyMutationQueueRef.current.then(operation);
@@ -842,11 +848,11 @@ function XtermSurface({
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
-      fitRef.current?.fit();
+      fitTerminal();
       if (focusTerminalOnActivateRef.current) focusTerminalIfAppropriate();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active, closeCommandSearch, closeInlineCompletion, closeTerminalContextMenu, focusTerminalIfAppropriate]);
+  }, [active, closeCommandSearch, closeInlineCompletion, closeTerminalContextMenu, fitTerminal, focusTerminalIfAppropriate]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -861,8 +867,8 @@ function XtermSurface({
   useEffect(() => {
     if (!terminalRef.current) return;
     terminalRef.current.options.fontSize = appearance.terminalFontSize || 14;
-    fitRef.current?.fit();
-  }, [appearance.terminalFontSize]);
+    fitTerminal();
+  }, [appearance.terminalFontSize, fitTerminal]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -1010,12 +1016,9 @@ function XtermSurface({
         })
         .catch((error) => onErrorRef.current?.(error, connectionId));
     });
-    const resizeSubscription = terminal.onResize(({ cols, rows }) => {
+    const resizeSubscription = terminal.onResize(() => {
       scheduleBottomAlignment();
-      if (!activeRef.current) return;
-      const currentSessionId = sessionIdRef.current;
-      if (!currentSessionId || connectionStateRef.current !== "connected") return;
-      void client.terminal.resize(currentSessionId, { cols, rows }).catch((error) => onErrorRef.current?.(error, connectionId));
+      syncTerminalSize();
     });
     const scrollSubscription = terminal.onScroll(() => {
       scheduleBottomAlignment();
@@ -1031,7 +1034,7 @@ function XtermSurface({
     });
     const resizeObserver = new ResizeObserver(() => {
       if (!activeRef.current) return;
-      fit.fit();
+      fitTerminal();
       scheduleBottomAlignment();
     });
     resizeObserver.observe(element);
@@ -1048,11 +1051,14 @@ function XtermSurface({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [client, closeCommandSearch, closeInlineCompletion, connectionId, copySelectedTerminalText, enqueueTerminalWrite, insertCompletion, openTerminalContextMenuAtCursor, pasteIntoTerminal, recordExecutedCommands, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
+  }, [client, closeCommandSearch, closeInlineCompletion, connectionId, copySelectedTerminalText, enqueueTerminalWrite, fitTerminal, insertCompletion, openTerminalContextMenuAtCursor, pasteIntoTerminal, recordExecutedCommands, syncTerminalSize, toggleCommandSearch, trackTerminalInput, updateInlineAnchor]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal || !sessionId) return undefined;
+    // A connecting/hidden terminal may already have fitted locally without a
+    // remote resize event. Synchronize explicitly for every new SSH attachment.
+    fitTerminal();
     let disposed = false;
     let attaching = true;
     const pendingData = [];
@@ -1071,7 +1077,7 @@ function XtermSurface({
         pendingData.length = 0;
         attaching = false;
         if (activeRef.current) {
-          fitRef.current?.fit();
+          fitTerminal();
           focusTerminalIfAppropriate();
         }
       })
@@ -1080,7 +1086,7 @@ function XtermSurface({
       disposed = true;
       unsubscribe();
     };
-  }, [client, connectionId, focusTerminalIfAppropriate, sessionId, updateInlineAnchor]);
+  }, [client, connectionId, fitTerminal, focusTerminalIfAppropriate, sessionId, updateInlineAnchor]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
