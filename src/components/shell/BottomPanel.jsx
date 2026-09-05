@@ -7,9 +7,9 @@ import {
 } from "@phosphor-icons/react";
 import { IconButton } from "../shared/IconButton.jsx";
 import {
-  calculateBottomPanelMaxHeight,
   clampBottomPanelHeight,
   MIN_BOTTOM_PANEL_HEIGHT,
+  observeBottomPanelLayout,
 } from "../../services/bottom-panel-layout.js";
 
 export function BottomPanel({ collapsed, height, activeView = "transfer", filesContent = null, transfers, servers, onViewChange, onToggle, onResize, onResetResize, onCancel, onRetry }) {
@@ -23,26 +23,10 @@ export function BottomPanel({ collapsed, height, activeView = "transfer", filesC
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return undefined;
-    const workbench = panel.closest(".workbench");
-    const terminalTabs = workbench?.querySelector(".terminal-pane > .native-workspace-tab-row");
-    const statusBar = workbench?.querySelector(".status-bar");
-    const updateMeasurements = () => {
-      const nextHeight = panel.offsetHeight;
+    return observeBottomPanelLayout(panel, ({ height: nextHeight, maxHeight: nextMaxHeight }) => {
       setPanelHeight((current) => current === nextHeight ? current : nextHeight);
-      const nextMaxHeight = calculateBottomPanelMaxHeight({
-        workbenchHeight: workbench?.clientHeight,
-        terminalTabsHeight: terminalTabs?.offsetHeight || 0,
-        statusBarHeight: statusBar?.offsetHeight || 0,
-      });
       setMaxPanelHeight((current) => current === nextMaxHeight ? current : nextMaxHeight);
-    };
-    const observer = new ResizeObserver(updateMeasurements);
-    observer.observe(panel);
-    if (workbench) observer.observe(workbench);
-    if (terminalTabs) observer.observe(terminalTabs);
-    if (statusBar) observer.observe(statusBar);
-    updateMeasurements();
-    return () => observer.disconnect();
+    });
   }, []);
 
   useEffect(() => {
@@ -51,7 +35,9 @@ export function BottomPanel({ collapsed, height, activeView = "transfer", filesC
   }, [collapsed, height, maxPanelHeight, onResize]);
 
   function startResize(event) {
-    if (collapsed) return;
+    if (collapsed || event.button !== 0) return;
+    // Resizing must preserve the active terminal/editor input rather than focus the separator.
+    event.preventDefault();
     const panel = event.currentTarget.closest(".bottom-panel");
     const renderedHeight = panel.getBoundingClientRect().height;
     const scaleY = panel.offsetHeight > 0 ? renderedHeight / panel.offsetHeight : 1;

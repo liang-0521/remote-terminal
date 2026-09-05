@@ -25,3 +25,50 @@ export function clampBottomPanelHeight(
 ) {
   return Math.round(Math.min(maxHeight, Math.max(minHeight, Number(height) || minHeight)));
 }
+
+export function observeBottomPanelLayout(panel, onMeasure, {
+  ResizeObserver: ResizeObserverClass = globalThis.ResizeObserver,
+  MutationObserver: MutationObserverClass = globalThis.MutationObserver,
+} = {}) {
+  const workbench = panel.closest(".workbench");
+  let terminalTabs = null;
+  let statusBar = null;
+  const resizeObserver = new ResizeObserverClass(measure);
+  const childObserver = new MutationObserverClass(measure);
+
+  function measure() {
+    const nextTabs = workbench?.querySelector(".terminal-pane > .native-workspace-tab-row") || null;
+    const nextStatus = workbench?.querySelector(".status-bar") || null;
+    if (terminalTabs !== nextTabs) {
+      if (terminalTabs) resizeObserver.unobserve(terminalTabs);
+      terminalTabs = nextTabs;
+      if (terminalTabs) resizeObserver.observe(terminalTabs);
+    }
+    if (statusBar !== nextStatus) {
+      if (statusBar) resizeObserver.unobserve(statusBar);
+      statusBar = nextStatus;
+      if (statusBar) resizeObserver.observe(statusBar);
+    }
+    onMeasure({
+      height: panel.offsetHeight,
+      maxHeight: calculateBottomPanelMaxHeight({
+        workbenchHeight: workbench?.clientHeight,
+        terminalTabsHeight: terminalTabs?.offsetHeight || 0,
+        statusBarHeight: statusBar?.offsetHeight || 0,
+      }),
+    });
+  }
+
+  resizeObserver.observe(panel);
+  if (workbench) {
+    resizeObserver.observe(workbench);
+    // Suspense can replace the terminal placeholder after this panel mounts.
+    // Observe direct workspace children, not terminal output or monitor updates.
+    childObserver.observe(workbench, { childList: true });
+  }
+  measure();
+  return () => {
+    resizeObserver.disconnect();
+    childObserver.disconnect();
+  };
+}

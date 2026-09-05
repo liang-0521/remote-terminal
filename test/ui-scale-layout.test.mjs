@@ -31,7 +31,8 @@ test("远程文本编辑器在主工作区和并排工作区都保持网格布�
 test("底部面板拖动统一使用逻辑高度并换算缩放后的指针位移", async () => {
   const source = await readFile(new URL("../src/components/shell/BottomPanel.jsx", import.meta.url), "utf8");
 
-  assert.match(source, /const nextHeight = panel\.offsetHeight/);
+  const layoutSource = await readFile(new URL("../src/services/bottom-panel-layout.js", import.meta.url), "utf8");
+  assert.match(layoutSource, /height: panel\.offsetHeight/);
   assert.match(source, /startHeight: panel\.offsetHeight/);
   assert.match(source, /renderedHeight \/ panel\.offsetHeight/);
   assert.match(source, /\(dragState\.current\.startY - event\.clientY\) \/ dragState\.current\.scaleY/);
