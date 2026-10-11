@@ -1737,6 +1737,15 @@ impl SshManager {
         self.inner.sessions.read().await.len()
     }
 
+    pub async fn has_connection_session(&self, connection_id: &str) -> bool {
+        self.inner
+            .sessions
+            .read()
+            .await
+            .values()
+            .any(|session| session.connection_id.eq_ignore_ascii_case(connection_id))
+    }
+
     pub async fn completion_catalog(&self, session_id: &str) -> AppResult<Vec<CompletionItem>> {
         let output = self.exec(session_id, COMPLETION_CATALOG_COMMAND).await?;
         let source = parse_completion_output(&output.stdout)?;

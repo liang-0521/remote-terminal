@@ -82,6 +82,7 @@ pub fn run() {
             commands::data_directory_change,
             commands::connections_list,
             commands::connections_save,
+            commands::connections_update,
             commands::connections_remove,
             commands::credentials_status,
             commands::credentials_remove,

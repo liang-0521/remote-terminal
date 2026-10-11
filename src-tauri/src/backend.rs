@@ -13,8 +13,8 @@ use crate::{
         UploadFile,
     },
     storage::{
-        migrate_legacy_electron_data, validate_id, Connection, ConnectionDraft, ConnectionRemoval,
-        ConnectionStore, KnownHostDraft, KnownHostsStore,
+        migrate_legacy_electron_data, validate_connection_draft, validate_id, Connection,
+        ConnectionDraft, ConnectionRemoval, ConnectionStore, KnownHostDraft, KnownHostsStore,
     },
 };
 use atomic_write_file::AtomicWriteFile;
@@ -304,6 +304,40 @@ impl BackendState {
         let _guard = self.lock_durable_data()?;
         self.ensure_operations_open()?;
         self.connections.save(connection)
+    }
+
+    pub async fn update_connection(
+        &self,
+        connection_id: &str,
+        draft: ConnectionDraft,
+    ) -> AppResult<ConnectionView> {
+        // Wait for authentication to finish before changing its configuration or credentials.
+        let _guard = self.operation_gate.write().await;
+        self.ensure_operations_open()?;
+        let has_session = self.ssh.has_connection_session(connection_id).await;
+        let _data_guard = self.lock_durable_data()?;
+        let draft = validate_connection_draft(draft)?;
+        let previous = self.connections.get(connection_id)?;
+        let target_changed = previous.host != draft.host
+            || previous.port != draft.port
+            || previous.username != draft.username
+            || previous.auth_method != draft.auth_method;
+        if target_changed && has_session {
+            return Err(AppError::new(
+                "CONNECTION_IN_USE",
+                "请先关闭该服务器工作区，再修改地址、端口或用户名。",
+            ));
+        }
+        let mut has_saved_password = self.credentials.has_saved_password(&previous.id)?;
+        if target_changed {
+            // Never send the old target's saved password to the new target.
+            self.credentials.remove(&previous.id)?;
+            has_saved_password = false;
+        }
+        Ok(ConnectionView {
+            connection: self.connections.update(&previous.id, draft)?,
+            has_saved_password,
+        })
     }
 
     pub fn remove_connection(&self, connection_id: &str) -> AppResult<ConnectionRemoval> {
@@ -1002,6 +1036,122 @@ fn map_monitor_error(_: crate::monitor::MonitorError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct EditCredentials(Mutex<HashMap<String, String>>);
+
+    impl crate::credentials::CredentialBackend for EditCredentials {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn save_password(&self, id: &str, password: &str) -> AppResult<()> {
+            self.0.lock().unwrap().insert(id.into(), password.into());
+            Ok(())
+        }
+        fn load_password(&self, id: &str) -> AppResult<Option<String>> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        fn contains_password(&self, id: &str) -> AppResult<bool> {
+            Ok(self.0.lock().unwrap().contains_key(id))
+        }
+        fn delete_password(&self, id: &str) -> AppResult<bool> {
+            Ok(self.0.lock().unwrap().remove(id).is_some())
+        }
+    }
+
+    struct EditEvents;
+    impl crate::ssh::SshEventSink for EditEvents {
+        fn emit(&self, _event: &str, _payload: serde_json::Value) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_edit_preserves_identity_history_and_only_reuses_credentials_for_same_target(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let state = BackendState {
+            connections: ConnectionStore::new(directory.path().join(CONNECTIONS_FILE)),
+            command_history: CommandHistoryStore::new(directory.path().join(COMMAND_HISTORY_FILE)),
+            known_hosts: KnownHostsStore::new(directory.path().join(KNOWN_HOSTS_FILE)),
+            credentials: CredentialStore::new(Arc::new(EditCredentials::default())),
+            ssh: SshManager::with_event_sink(
+                Arc::new(EditEvents),
+                directory.path().join("downloads"),
+            )
+            .unwrap(),
+            durable_data_gate: Mutex::new(()),
+            host_key_challenges: Mutex::new(HashMap::new()),
+            monitor_sampling: Arc::new(Mutex::new(HashSet::new())),
+            operation_gate: AsyncRwLock::new(()),
+            operation_block: AtomicU8::new(OperationBlock::Open as u8),
+        };
+        let mut draft = ConnectionDraft {
+            name: "Original".into(),
+            host: "original.test".into(),
+            port: 22,
+            username: "root".into(),
+            auth_method: crate::storage::AuthMethod::Password,
+        };
+        let saved = state.save_connection(draft.clone()).unwrap();
+        state
+            .credentials
+            .save(&saved.id, "test-only-password")
+            .unwrap();
+        state.record_command_history(&saved.id, "pwd").unwrap();
+        draft.name = "Renamed".into();
+        let renamed = state
+            .update_connection(&saved.id, draft.clone())
+            .await
+            .unwrap();
+        assert_eq!(renamed.connection.id, saved.id);
+        assert_eq!(renamed.connection.created_at, saved.created_at);
+        assert!(renamed.has_saved_password);
+        assert_eq!(
+            state.credentials.get(&saved.id).unwrap(),
+            "test-only-password"
+        );
+
+        let mut invalid = draft.clone();
+        invalid.port = 0;
+        assert_eq!(
+            state
+                .update_connection(&saved.id, invalid)
+                .await
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+        assert!(state.credentials.has_saved_password(&saved.id).unwrap());
+        assert_eq!(
+            state.connections.get(&saved.id).unwrap(),
+            renamed.connection
+        );
+
+        for field in ["host", "port", "username"] {
+            state
+                .credentials
+                .save(&saved.id, "test-only-password")
+                .unwrap();
+            match field {
+                "host" => draft.host = "replacement.test".into(),
+                "port" => draft.port = 2222,
+                "username" => draft.username = "deploy".into(),
+                _ => unreachable!(),
+            }
+            let updated = state
+                .update_connection(&saved.id, draft.clone())
+                .await
+                .unwrap();
+            assert!(!updated.has_saved_password, "{field}");
+            assert!(!state.credentials.has_saved_password(&saved.id).unwrap());
+            assert_eq!(updated.connection.id, saved.id);
+        }
+        assert_eq!(state.list_connections().unwrap().len(), 1);
+        assert_eq!(state.list_command_history(&saved.id).unwrap(), vec!["pwd"]);
+        let stored = std::fs::read_to_string(directory.path().join(CONNECTIONS_FILE)).unwrap();
+        assert!(!stored.contains("test-only-password"));
+    }
 
     #[test]
     fn credential_request_is_strict_and_uses_stable_wire_values() {

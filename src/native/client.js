@@ -12,6 +12,7 @@ const UI_SCALE_FACTORS = new Set([0.8, 0.9, 1, 1.1, 1.25, 1.5]);
 const TAURI_COMMANDS = Object.freeze({
   connectionsList: "connections_list",
   connectionsSave: "connections_save",
+  connectionsUpdate: "connections_update",
   connectionsRemove: "connections_remove",
   dataDirectoryStatus: "data_directory_status",
   dataDirectoryChange: "data_directory_change",
@@ -427,6 +428,7 @@ function createTauriClient(api) {
     connections: Object.freeze({
       list: () => call(TAURI_COMMANDS.connectionsList),
       save: (connection) => call(TAURI_COMMANDS.connectionsSave, { connection }),
+      update: (connectionId, connection) => call(TAURI_COMMANDS.connectionsUpdate, { connectionId, connection }),
       remove: (connectionId) => call(TAURI_COMMANDS.connectionsRemove, { connectionId }),
     }),
     storage: Object.freeze({

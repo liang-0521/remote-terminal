@@ -178,6 +178,15 @@ pub fn connections_save(
 }
 
 #[tauri::command]
+pub async fn connections_update(
+    connection_id: String,
+    connection: ConnectionDraft,
+    state: State<'_, BackendState>,
+) -> AppResult<ConnectionView> {
+    state.update_connection(&connection_id, connection).await
+}
+
+#[tauri::command]
 pub fn connections_remove(
     connection_id: String,
     state: State<'_, BackendState>,

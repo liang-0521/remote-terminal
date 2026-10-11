@@ -58,6 +58,7 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
   const client = createNativeClient(api);
 
   await client.connections.save({ id: "server-1" });
+  await client.connections.update("server-1", { name: "Renamed", host: "example.test", port: 2222, username: "root", authMethod: "password" });
   await client.ssh.connect({ connectionId: "server-1", dimensions: { cols: 120, rows: 32 } });
   await client.terminal.resize("session-1", { cols: 80, rows: 24 });
   await client.terminal.completions("session-1");
@@ -82,6 +83,7 @@ test("Tauri 命令保持现有前端方法签名并映射到 snake_case 参数",
 
   assert.deepEqual(api.calls.filter((item) => item.type === "invoke"), [
     { type: "invoke", command: "connections_save", args: { connection: { id: "server-1" } } },
+    { type: "invoke", command: "connections_update", args: { connectionId: "server-1", connection: { name: "Renamed", host: "example.test", port: 2222, username: "root", authMethod: "password" } } },
     {
       type: "invoke",
       command: "ssh_connect",

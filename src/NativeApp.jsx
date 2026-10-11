@@ -766,6 +766,32 @@ export function NativeApp() {
     void beginConnect(saved.id, password, savePassword).catch(() => undefined);
   }
 
+  async function updateServerConnection(connectionId, values, { password, savePassword }) {
+    const previous = connections.find((item) => item.id === connectionId);
+    if (!previous) throw new Error("未找到该服务器连接配置。");
+    const targetChanged = previous.host !== values.host || previous.port !== values.port
+      || previous.username !== values.username || previous.authMethod !== values.authMethod;
+    if ((targetChanged || password) && (workspaceOrder.includes(connectionId) || attemptsRef.current.has(connectionId))) {
+      throw new Error("请先关闭该服务器工作区，再修改地址、端口、用户名或使用新密码连接。名称可直接修改。");
+    }
+    const saved = await client.connections.update(connectionId, values);
+    setConnections((items) => items.map((item) => item.id === connectionId ? saved : item));
+    if (targetChanged) {
+      // A closed workspace can retain old directory snapshots; never reuse them for another target.
+      directoryRequestsRef.current.delete(connectionId);
+      completionRequestsRef.current.delete(connectionId);
+      pendingSecretsRef.current.delete(connectionId);
+      const next = { ...workspacesRef.current };
+      delete next[connectionId];
+      workspacesRef.current = next;
+      setWorkspaces(next);
+    }
+    if (password) {
+      setConnectionDialog({ open: false, view: "list" });
+      void beginConnect(connectionId, password, savePassword).catch(() => undefined);
+    }
+  }
+
   async function submitSavedPassword(password, { savePassword }) {
     const connectionId = passwordConnectionId;
     if (!connectionId) return;
@@ -1411,6 +1437,7 @@ export function NativeApp() {
         onClose={() => setConnectionDialog({ open: false, view: "list" })}
         onSelectServer={selectServer}
         onCreateServer={createServerConnection}
+        onUpdateServer={updateServerConnection}
         onForgetPassword={forgetSavedPassword}
         onDeleteServer={deleteServerConnection}
         credentialStorage={credentialStorage}

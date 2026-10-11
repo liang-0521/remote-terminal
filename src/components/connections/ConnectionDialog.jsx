@@ -6,6 +6,7 @@ import {
   EyeSlash,
   HardDrives,
   Key,
+  PencilSimple,
   Plus,
   ShieldCheck,
   Trash,
@@ -35,7 +36,7 @@ function normalizeView(view) {
   return view === "new" ? "new" : "list";
 }
 
-function validateConnection(form) {
+function validateConnection(form, editing = false) {
   const errors = {};
   const port = Number(form.port);
 
@@ -47,7 +48,7 @@ function validateConnection(form) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     errors.port = "端口必须是 1–65535 的整数";
   }
-  if (form.authMethod === "password" && !form.password) {
+  if (!editing && form.authMethod === "password" && !form.password) {
     errors.password = "请输入密码";
   }
 
@@ -62,12 +63,14 @@ export function ConnectionDialog({
   onClose,
   onSelectServer,
   onCreateServer,
+  onUpdateServer,
   onForgetPassword,
   onDeleteServer,
   credentialStorage = { available: false },
 }) {
   const [view, setView] = useState(() => normalizeView(initialView));
   const [form, setForm] = useState(EMPTY_FORM);
+  const [editingId, setEditingId] = useState(null);
   const [errors, setErrors] = useState({});
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -87,6 +90,7 @@ export function ConnectionDialog({
   });
 
   useEffect(() => {
+    setEditingId(null);
     if (!open) {
       setForm(EMPTY_FORM);
       setErrors({});
@@ -114,12 +118,30 @@ export function ConnectionDialog({
 
   function showView(nextView) {
     setView(nextView);
+    setEditingId(null);
     setErrors({});
     setSubmitError("");
-    if (nextView !== "new") {
-      setForm(EMPTY_FORM);
-      setPasswordVisible(false);
-    }
+    setForm(EMPTY_FORM);
+    setPasswordVisible(false);
+    setDeleteConfirmId(null);
+    window.requestAnimationFrame(() => firstActionRef.current?.focus());
+  }
+
+  function editServer(server) {
+    setEditingId(server.id);
+    setForm({
+      ...EMPTY_FORM,
+      name: server.name,
+      host: server.host,
+      port: String(server.port),
+      username: server.username,
+      authMethod: server.authMethod,
+    });
+    setErrors({});
+    setSubmitError("");
+    setPasswordVisible(false);
+    setDeleteConfirmId(null);
+    setView("edit");
     window.requestAnimationFrame(() => firstActionRef.current?.focus());
   }
 
@@ -143,7 +165,8 @@ export function ConnectionDialog({
 
   async function submitConnection(event) {
     event.preventDefault();
-    const nextErrors = validateConnection(form);
+    if (submitting) return;
+    const nextErrors = validateConnection(form, Boolean(editingId));
 
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
@@ -165,10 +188,13 @@ export function ConnectionDialog({
     setSubmitting(true);
     setSubmitError("");
     try {
-      await onCreateServer(connection, {
-        password,
-        savePassword: form.savePassword,
-      });
+      const credential = { password, savePassword: form.savePassword };
+      if (editingId) {
+        await onUpdateServer(editingId, connection, credential);
+        showView("list");
+      } else {
+        await onCreateServer(connection, credential);
+      }
     } catch (error) {
       setSubmitError(error?.message || "无法保存或连接该服务器。请重试。" );
     } finally {
@@ -231,12 +257,12 @@ export function ConnectionDialog({
             </span>
             <div>
               <h2 id="connection-manager-title">
-                {view === "list" ? "连接管理" : "新增 SSH 连接"}
+                {view === "list" ? "连接管理" : editingId ? "编辑 SSH 连接" : "新增 SSH 连接"}
               </h2>
               <p id="connection-manager-description">
                 {view === "list"
                   ? "选择已保存服务器，打开独立工作区"
-                  : "连接配置会保存到本机；密码默认仅用于本次连接"}
+                  : editingId ? "修改已有连接；不填写密码时只保存配置" : "连接配置会保存到本机；密码默认仅用于本次连接"}
               </p>
             </div>
           </div>
@@ -304,6 +330,12 @@ export function ConnectionDialog({
                         打开工作区
                         <ArrowRight size={16} />
                       </button>
+                      {onUpdateServer && (
+                        <button type="button" disabled={deletingId === server.id} onClick={() => editServer(server)}>
+                          <PencilSimple size={16} />
+                          编辑连接
+                        </button>
+                      )}
                       {server.hasSavedPassword && (
                         <button
                           type="button"
@@ -344,12 +376,14 @@ export function ConnectionDialog({
             <div className="connection-form__notice" role="note">
               <ShieldCheck size={20} weight="duotone" />
               <div>
-                <strong>原生安全连接</strong>
-                <span>默认只用于本次连接；选择保存后，由当前 Windows 用户凭据加密，连接配置仍不含密码。</span>
+                <strong>{editingId ? "编辑已保存连接" : "原生安全连接"}</strong>
+                <span>{editingId
+                  ? "名称可直接修改。修改地址、端口、用户名或使用新密码连接前，请先关闭该服务器工作区。连接目标变化会清除旧保存密码。"
+                  : "默认只用于本次连接；选择保存后，由当前 Windows 用户凭据加密，连接配置仍不含密码。"}</span>
               </div>
             </div>
 
-            <div className="connection-form__grid">
+            <fieldset className="connection-form__grid" disabled={submitting} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <Field label="连接名称" name="name" error={errors.name} required>
                 <input
                   ref={firstActionRef}
@@ -425,7 +459,7 @@ export function ConnectionDialog({
               </Field>
 
               {form.authMethod === "password" && (
-                <Field label="密码" name="password" error={errors.password} required wide>
+                <Field label={editingId ? "新密码（可选）" : "密码"} name="password" error={errors.password} required={!editingId} wide>
                   <div className="connection-form__input-icon">
                     <Key size={17} aria-hidden="true" />
                     <input
@@ -434,7 +468,7 @@ export function ConnectionDialog({
                       type={passwordVisible ? "text" : "password"}
                       value={form.password}
                       onChange={updateField}
-                      placeholder="输入本次 SSH 连接密码"
+                      placeholder={editingId ? "留空不修改；填写后保存配置并连接" : "输入本次 SSH 连接密码"}
                       autoComplete="off"
                       aria-invalid={Boolean(errors.password)}
                       aria-describedby={errors.password ? "connection-password-error" : undefined}
@@ -462,7 +496,7 @@ export function ConnectionDialog({
                       name="savePassword"
                       type="checkbox"
                       checked={form.savePassword}
-                      disabled={!credentialStorage.available}
+                      disabled={!credentialStorage.available || (Boolean(editingId) && !form.password)}
                       onChange={updateField}
                     />
                     <span>使用 Windows 安全保存密码</span>
@@ -474,7 +508,7 @@ export function ConnectionDialog({
                   </small>
                 </div>
               )}
-            </div>
+            </fieldset>
 
             {submitError && <div className="connection-form__submit-error" role="alert">{submitError}</div>}
 
@@ -484,8 +518,8 @@ export function ConnectionDialog({
                 返回连接列表
               </button>
               <button type="submit" className="connection-form__submit" disabled={submitting}>
-                <Plus size={17} weight="bold" />
-                {submitting ? "正在保存…" : "保存并连接"}
+                {editingId ? <PencilSimple size={17} weight="bold" /> : <Plus size={17} weight="bold" />}
+                {submitting ? "正在保存…" : editingId && !form.password ? "保存修改" : "保存并连接"}
               </button>
             </footer>
           </form>

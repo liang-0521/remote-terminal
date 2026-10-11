@@ -346,6 +346,30 @@ impl ConnectionStore {
         )
     }
 
+    pub fn update(&self, connection_id: &str, draft: ConnectionDraft) -> AppResult<Connection> {
+        let id = validate_id(connection_id, "连接标识")?;
+        let draft = validate_connection_draft(draft)?;
+        self.store.update(
+            validate_connection_document,
+            |document: &mut ConnectionDocument| {
+                let connection = document
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id.eq_ignore_ascii_case(&id))
+                    .ok_or_else(|| {
+                        AppError::new("CONNECTION_NOT_FOUND", "未找到该服务器连接配置。")
+                    })?;
+                connection.name = draft.name;
+                connection.host = draft.host;
+                connection.port = draft.port;
+                connection.username = draft.username;
+                connection.auth_method = draft.auth_method;
+                connection.updated_at = now_timestamp();
+                Ok(connection.clone())
+            },
+        )
+    }
+
     fn import_missing(&self, connections: &[Connection]) -> AppResult<()> {
         if connections.is_empty() {
             return Ok(());
@@ -747,7 +771,7 @@ pub fn known_host_key(host: &str, port: u16) -> AppResult<String> {
     Ok(format!("{}:{port}", host.to_lowercase()))
 }
 
-fn validate_connection_draft(draft: ConnectionDraft) -> AppResult<ConnectionDraft> {
+pub(crate) fn validate_connection_draft(draft: ConnectionDraft) -> AppResult<ConnectionDraft> {
     Ok(ConnectionDraft {
         name: validate_string(&draft.name, "连接名称", 1, 80, true)?,
         host: validate_string(&draft.host, "主机地址", 1, 253, false)?,
@@ -1075,6 +1099,34 @@ mod tests {
         invalid.username = "  ".to_string();
         let error = store.save(invalid).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn connection_update_keeps_order_and_creation_time_and_rejects_missing_or_invalid_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(CONNECTIONS_FILE);
+        let first = persisted_connection(CONNECTION_ID, "Original", "old.test");
+        let second = persisted_connection(SECOND_CONNECTION_ID, "Other", "other.test");
+        write_connections(directory.path(), vec![first.clone(), second.clone()]);
+        let store = ConnectionStore::new(path.clone());
+        let updated = store.update(CONNECTION_ID, draft()).unwrap();
+        assert_eq!(updated.id, first.id);
+        assert_eq!(updated.created_at, first.created_at);
+        assert_ne!(updated.updated_at, first.updated_at);
+        assert_eq!(updated.host, "example.test");
+        assert_eq!(store.list().unwrap(), vec![updated, second]);
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            store.update(THIRD_CONNECTION_ID, draft()).unwrap_err().code,
+            "CONNECTION_NOT_FOUND"
+        );
+        let mut invalid = draft();
+        invalid.username = "invalid user".into();
+        assert_eq!(
+            store.update(CONNECTION_ID, invalid).unwrap_err().code,
+            "INVALID_INPUT"
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
     }
 
     #[test]
